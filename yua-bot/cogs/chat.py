@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
-from google import genai
-from google.genai import types
+import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from collections import deque
 import os
 import random
@@ -19,17 +19,16 @@ GREETINGS = {"hi", "hello", "hey", "hiya", "heya", "হ্যালো", "হা
 COOLDOWN_SECONDS = 5
 
 MODELS_TO_TRY = [
-    "gemini-2.5-flash",
     "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash",
 ]
 
-SAFETY_SETTINGS = [
-    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT",        threshold="BLOCK_NONE"),
-    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH",       threshold="BLOCK_NONE"),
-    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-]
+SAFETY_SETTINGS = {
+    HarmCategory.HARM_CATEGORY_HARASSMENT:        HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH:       HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+}
 
 
 def build_system_prompt(user_name: str) -> str:
@@ -55,58 +54,57 @@ class Chat(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-        key1 = os.getenv("GEMINI_API_KEY")
-        key2 = os.getenv("GEMINI_API_KEY_2")
+        self.key1 = os.getenv("GEMINI_API_KEY")
+        self.key2 = os.getenv("GEMINI_API_KEY_2")
 
-        self.api_keys = [(1, key1), (2, key2)]
-        self.api_keys = [(num, k) for num, k in self.api_keys if k]
+        if not self.key1:
+            raise ValueError("GEMINI_API_KEY is not set in Secrets.")
 
-        if not self.api_keys:
-            raise ValueError("No Gemini API keys found. Set GEMINI_API_KEY in Secrets.")
-
-        print(f"Loaded {len(self.api_keys)} Gemini API key(s).")
+        key_count = sum(1 for k in [self.key1, self.key2] if k)
+        print(f"Loaded {key_count} Gemini API key(s).")
 
         self.user_memory = {}
         self.user_cooldowns = {}
         self.cooldown_warned = set()
 
-    def generate_response(self, prompt: str) -> str:
-        for model in MODELS_TO_TRY:
-            for key_num, api_key in self.api_keys:
+    def generate_response(self, prompt: str, user_name: str) -> str:
+        keys = [k for k in [self.key1, self.key2] if k]
+
+        for key_num, api_key in enumerate(keys, start=1):
+            for model_name in MODELS_TO_TRY:
                 try:
-                    print(f"[Key {key_num}] Trying model: {model}")
-                    client = genai.Client(api_key=api_key)
-                    response = client.models.generate_content(
-                        model=model,
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            safety_settings=SAFETY_SETTINGS,
-                        ),
+                    print(f"[Key {key_num}] Configuring with model: {model_name}")
+                    genai.configure(api_key=api_key)
+                    model = genai.GenerativeModel(
+                        model_name=model_name,
+                        safety_settings=SAFETY_SETTINGS,
                     )
+                    response = model.generate_content(prompt)
+
                     try:
                         text = response.text
                     except Exception as inner:
-                        print(f"[Key {key_num}] model={model}: response.text failed: {inner}")
+                        print(f"[Key {key_num}] model={model_name}: response.text error: {inner}")
                         text = None
 
                     if text and text.strip():
-                        print(f"[Key {key_num}] model={model}: SUCCESS")
+                        print(f"[Key {key_num}] model={model_name}: SUCCESS")
                         return text.strip()
                     else:
-                        print(f"[Key {key_num}] model={model}: empty response, trying next.")
+                        print(f"[Key {key_num}] model={model_name}: empty response, trying next.")
 
                 except Exception as e:
                     err = str(e)
                     if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                        print(f"[Key {key_num}] model={model}: QUOTA ERROR — {e}")
+                        print(f"[Key {key_num}] model={model_name}: QUOTA ERROR — {e}")
                     elif "503" in err or "UNAVAILABLE" in err:
-                        print(f"[Key {key_num}] model={model}: SERVER UNAVAILABLE — {e}")
+                        print(f"[Key {key_num}] model={model_name}: SERVER UNAVAILABLE — {e}")
                     elif "404" in err or "NOT_FOUND" in err:
-                        print(f"[Key {key_num}] model={model}: MODEL NOT FOUND — {e}")
+                        print(f"[Key {key_num}] model={model_name}: MODEL NOT FOUND — {e}")
                     else:
-                        print(f"[Key {key_num}] model={model}: UNKNOWN ERROR — {e}")
+                        print(f"[Key {key_num}] model={model_name}: UNKNOWN ERROR — {e}")
 
-        print("All keys and models failed. Sending fallback.")
+        print("All keys and models failed.")
         return ""
 
     def get_memory_context(self, user_id: int) -> str:
@@ -186,12 +184,12 @@ class Chat(commands.Cog):
 
                 self.store_message(user_id, "User", prompt)
 
-                reply_text = self.generate_response(full_prompt)
+                reply_text = self.generate_response(full_prompt, user_name)
 
                 if not reply_text:
                     reply_text = (
                         f"Gomenasai, {user_name}! 🌸 "
-                        f"Amar brain ekhon ektu tired, 5 minute por abar kotha boli?"
+                        f"Amar brain ekhon ektu tired, ektu por abar kotha boli?"
                     )
 
                 self.store_message(user_id, "Yua", reply_text)
@@ -202,7 +200,7 @@ class Chat(commands.Cog):
                 try:
                     await message.reply(
                         f"Gomenasai, {user_name}! 🌸 "
-                        f"Amar brain ekhon ektu tired, 5 minute por abar kotha boli?"
+                        f"Amar brain ekhon ektu tired, ektu por abar kotha boli?"
                     )
                 except Exception:
                     pass
