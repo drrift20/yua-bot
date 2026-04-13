@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
 from google import genai
+from google.genai import types
 from collections import deque
 import os
 import random
@@ -16,6 +17,19 @@ MOODS = {
 GREETINGS = {"hi", "hello", "hey", "hiya", "heya", "হ্যালো", "হাই"}
 
 COOLDOWN_SECONDS = 5
+
+MODELS_TO_TRY = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+]
+
+SAFETY_SETTINGS = [
+    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT",        threshold="BLOCK_NONE"),
+    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH",       threshold="BLOCK_NONE"),
+    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+]
 
 
 def build_system_prompt(user_name: str) -> str:
@@ -41,20 +55,14 @@ class Chat(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-        raw_keys = [
-            os.getenv("GEMINI_API_KEY"),
-            os.getenv("GEMINI_API_KEY_2"),
-        ]
-        self.api_keys = [k for k in raw_keys if k]
+        key1 = os.getenv("GEMINI_API_KEY")
+        key2 = os.getenv("GEMINI_API_KEY_2")
+
+        self.api_keys = [(1, key1), (2, key2)]
+        self.api_keys = [(num, k) for num, k in self.api_keys if k]
 
         if not self.api_keys:
             raise ValueError("No Gemini API keys found. Set GEMINI_API_KEY in Secrets.")
-
-        self.models_to_try = [
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-        ]
 
         print(f"Loaded {len(self.api_keys)} Gemini API key(s).")
 
@@ -62,36 +70,43 @@ class Chat(commands.Cog):
         self.user_cooldowns = {}
         self.cooldown_warned = set()
 
-    def get_client(self, api_key: str) -> genai.Client:
-        return genai.Client(api_key=api_key)
-
-    def generate_response(self, prompt: str) -> str | None:
-        quota_hit = False
-        for model in self.models_to_try:
-            for key in self.api_keys:
+    def generate_response(self, prompt: str) -> str:
+        for model in MODELS_TO_TRY:
+            for key_num, api_key in self.api_keys:
                 try:
-                    client = self.get_client(key)
+                    print(f"[Key {key_num}] Trying model: {model}")
+                    client = genai.Client(api_key=api_key)
                     response = client.models.generate_content(
                         model=model,
-                        contents=prompt
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            safety_settings=SAFETY_SETTINGS,
+                        ),
                     )
                     try:
                         text = response.text
-                    except Exception:
+                    except Exception as inner:
+                        print(f"[Key {key_num}] model={model}: response.text failed: {inner}")
                         text = None
+
                     if text and text.strip():
+                        print(f"[Key {key_num}] model={model}: SUCCESS")
                         return text.strip()
+                    else:
+                        print(f"[Key {key_num}] model={model}: empty response, trying next.")
+
                 except Exception as e:
                     err = str(e)
-                    if "429" in err or "RESOURCE_EXHAUSTED" in err or "503" in err or "UNAVAILABLE" in err:
-                        print(f"Quota/unavailable on model={model} key=...{key[-6:]}, trying next.")
-                        quota_hit = True
-                        continue
+                    if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                        print(f"[Key {key_num}] model={model}: QUOTA ERROR — {e}")
+                    elif "503" in err or "UNAVAILABLE" in err:
+                        print(f"[Key {key_num}] model={model}: SERVER UNAVAILABLE — {e}")
+                    elif "404" in err or "NOT_FOUND" in err:
+                        print(f"[Key {key_num}] model={model}: MODEL NOT FOUND — {e}")
                     else:
-                        print(f"Error on model={model} key=...{key[-6:]}: {e}")
-                        continue
-        if quota_hit:
-            return "QUOTA_EXHAUSTED"
+                        print(f"[Key {key_num}] model={model}: UNKNOWN ERROR — {e}")
+
+        print("All keys and models failed. Sending fallback.")
         return ""
 
     def get_memory_context(self, user_id: int) -> str:
@@ -173,22 +188,21 @@ class Chat(commands.Cog):
 
                 reply_text = self.generate_response(full_prompt)
 
-                if reply_text == "QUOTA_EXHAUSTED":
+                if not reply_text:
                     reply_text = (
-                        f"Amar AI brain ektu thaka lagbe, {user_name}~ 😳 "
-                        f"Ekhon onek request ache, ektu por try koro! ❤️"
+                        f"Gomenasai, {user_name}! 🌸 "
+                        f"Amar brain ekhon ektu tired, 5 minute por abar kotha boli?"
                     )
-                elif not reply_text:
-                    reply_text = f"Hmm... {mood_emoji} Kichhu ekta problem holo, {user_name}~ Ektu por try koro!"
 
                 self.store_message(user_id, "Yua", reply_text)
                 await message.reply(reply_text)
 
             except Exception as e:
-                print(f"Unexpected error: {e}")
+                print(f"Unexpected on_message error: {e}")
                 try:
                     await message.reply(
-                        f"Gomenasai, {user_name}~ 🌸 Ektu problem hoyeche! Please try again."
+                        f"Gomenasai, {user_name}! 🌸 "
+                        f"Amar brain ekhon ektu tired, 5 minute por abar kotha boli?"
                     )
                 except Exception:
                     pass
