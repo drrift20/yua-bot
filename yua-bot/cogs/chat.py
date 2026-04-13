@@ -51,9 +51,9 @@ class Chat(commands.Cog):
             raise ValueError("No Gemini API keys found. Set GEMINI_API_KEY in Secrets.")
 
         self.models_to_try = [
+            "gemini-2.5-flash",
             "gemini-2.0-flash",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
+            "gemini-2.0-flash-lite",
         ]
 
         print(f"Loaded {len(self.api_keys)} Gemini API key(s).")
