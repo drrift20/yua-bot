@@ -65,7 +65,8 @@ class Chat(commands.Cog):
     def get_client(self, api_key: str) -> genai.Client:
         return genai.Client(api_key=api_key)
 
-    def generate_response(self, prompt: str) -> str:
+    def generate_response(self, prompt: str) -> str | None:
+        quota_hit = False
         for model in self.models_to_try:
             for key in self.api_keys:
                 try:
@@ -82,12 +83,15 @@ class Chat(commands.Cog):
                         return text.strip()
                 except Exception as e:
                     err = str(e)
-                    if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                        print(f"429 on model={model} key=...{key[-6:]}, trying next.")
+                    if "429" in err or "RESOURCE_EXHAUSTED" in err or "503" in err or "UNAVAILABLE" in err:
+                        print(f"Quota/unavailable on model={model} key=...{key[-6:]}, trying next.")
+                        quota_hit = True
                         continue
                     else:
                         print(f"Error on model={model} key=...{key[-6:]}: {e}")
                         continue
+        if quota_hit:
+            return "QUOTA_EXHAUSTED"
         return ""
 
     def get_memory_context(self, user_id: int) -> str:
@@ -169,8 +173,13 @@ class Chat(commands.Cog):
 
                 reply_text = self.generate_response(full_prompt)
 
-                if not reply_text:
-                    reply_text = f"Hmm... {mood_emoji} Ektu wait koro, {user_name}~ Please try again!"
+                if reply_text == "QUOTA_EXHAUSTED":
+                    reply_text = (
+                        f"Amar AI brain ektu thaka lagbe, {user_name}~ 😳 "
+                        f"Ekhon onek request ache, ektu por try koro! ❤️"
+                    )
+                elif not reply_text:
+                    reply_text = f"Hmm... {mood_emoji} Kichhu ekta problem holo, {user_name}~ Ektu por try koro!"
 
                 self.store_message(user_id, "Yua", reply_text)
                 await message.reply(reply_text)
