@@ -3,6 +3,7 @@ from discord.ext import commands
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from groq import Groq
+from pymongo import MongoClient, ASCENDING
 from collections import deque
 import os
 import random
@@ -18,6 +19,7 @@ MOODS = {
 GREETINGS = {"hi", "hello", "hey", "hiya", "heya", "হ্যালো", "হাই"}
 
 COOLDOWN_SECONDS = 5
+MEMORY_LIMIT = 15
 
 GEMINI_MODELS = [
     "gemini-2.0-flash",
@@ -69,9 +71,76 @@ class Chat(commands.Cog):
         groq_status = "yes" if self.groq_key else "not set"
         print(f"Loaded {gemini_count} Gemini key(s). Groq fallback: {groq_status}.")
 
-        self.user_memory = {}
+        # --- MongoDB Permanent Memory ---
+        self.mongo_col = None
+        mongo_uri = os.getenv("MONGO_URI")
+        if mongo_uri:
+            try:
+                client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+                client.admin.command("ping")
+                db = client["yua_bot"]
+                self.mongo_col = db["memory"]
+                self.mongo_col.create_index([("user_id", ASCENDING)], unique=True)
+                print("MongoDB connected. Permanent memory active.")
+            except Exception as e:
+                print(f"MongoDB connection failed, using in-memory fallback: {e}")
+        else:
+            print("MONGO_URI not set. Using in-memory memory only.")
+
+        # In-memory fallback (also used as a session cache)
+        self.local_memory = {}
         self.user_cooldowns = {}
         self.cooldown_warned = set()
+
+    # ------------------------------------------------------------------
+    # MongoDB memory helpers
+    # ------------------------------------------------------------------
+    def fetch_history(self, user_id: int) -> list:
+        """Fetch last MEMORY_LIMIT messages from MongoDB, or local cache."""
+        uid = str(user_id)
+        if self.mongo_col is not None:
+            try:
+                doc = self.mongo_col.find_one({"user_id": uid})
+                if doc:
+                    return doc.get("messages", [])
+            except Exception as e:
+                print(f"[MongoDB] fetch_history error: {e}")
+        # Fallback to local
+        return list(self.local_memory.get(user_id, []))
+
+    def save_message(self, user_id: int, role: str, content: str):
+        """Append a message and keep only the last MEMORY_LIMIT entries."""
+        uid = str(user_id)
+        entry = {"role": role, "content": content}
+
+        # Always update local cache too
+        if user_id not in self.local_memory:
+            self.local_memory[user_id] = deque(maxlen=MEMORY_LIMIT)
+        self.local_memory[user_id].append(entry)
+
+        if self.mongo_col is not None:
+            try:
+                self.mongo_col.update_one(
+                    {"user_id": uid},
+                    {
+                        "$push": {
+                            "messages": {
+                                "$each": [entry],
+                                "$slice": -MEMORY_LIMIT,
+                            }
+                        }
+                    },
+                    upsert=True,
+                )
+            except Exception as e:
+                print(f"[MongoDB] save_message error: {e}")
+
+    def build_memory_context(self, history: list) -> str:
+        """Format message history into a prompt context string."""
+        if not history:
+            return ""
+        lines = "\n".join(f"  {m['role']}: {m['content']}" for m in history)
+        return f"\nConversation history (oldest to newest):\n{lines}\n"
 
     # ------------------------------------------------------------------
     # Step 1 & 2 — Try Gemini Key 1, then Gemini Key 2
@@ -86,19 +155,16 @@ class Chat(commands.Cog):
                     safety_settings=SAFETY_SETTINGS,
                 )
                 response = model.generate_content(prompt)
-
                 try:
                     text = response.text
                 except Exception as inner:
                     print(f"[Gemini Key {key_num}] model={model_name}: response.text error: {inner}")
                     text = None
-
                 if text and text.strip():
                     print(f"[Gemini Key {key_num}] model={model_name}: SUCCESS")
                     return text.strip()
                 else:
                     print(f"[Gemini Key {key_num}] model={model_name}: empty response, trying next.")
-
             except Exception as e:
                 err = str(e)
                 if "429" in err or "RESOURCE_EXHAUSTED" in err:
@@ -150,42 +216,18 @@ class Chat(commands.Cog):
     # Master generate — tries all three sources in order
     # ------------------------------------------------------------------
     def generate_response(self, full_prompt: str, system_prompt: str, user_prompt: str) -> str:
-        # Step 1: Gemini Key 1
         result = self._try_gemini(self.key1, 1, full_prompt)
         if result:
             return result
-
-        # Step 2: Gemini Key 2
         if self.key2:
             result = self._try_gemini(self.key2, 2, full_prompt)
             if result:
                 return result
-
-        # Step 3: Groq (Llama 3) fallback
         result = self._try_groq(system_prompt, user_prompt)
         if result:
             return result
-
-        # Step 4: Everything failed
         print("All sources failed.")
         return ""
-
-    # ------------------------------------------------------------------
-    # Memory helpers
-    # ------------------------------------------------------------------
-    def get_memory_context(self, user_id: int) -> str:
-        history = self.user_memory.get(user_id)
-        if not history:
-            return ""
-        lines = "\n".join(
-            f"  {entry['role']}: {entry['content']}" for entry in history
-        )
-        return f"\nRecent conversation (oldest to newest):\n{lines}\n"
-
-    def store_message(self, user_id: int, role: str, content: str):
-        if user_id not in self.user_memory:
-            self.user_memory[user_id] = deque(maxlen=5)
-        self.user_memory[user_id].append({"role": role, "content": content})
 
     # ------------------------------------------------------------------
     # Cooldown helpers
@@ -240,12 +282,14 @@ class Chat(commands.Cog):
                         f"Ami tomar jonno wait korchilam! ❤️"
                     )
                     await message.reply(greeting)
-                    self.store_message(user_id, "User", user_prompt)
-                    self.store_message(user_id, "Yua", greeting)
+                    self.save_message(user_id, "User", user_prompt)
+                    self.save_message(user_id, "Yua", greeting)
                     return
 
+                # Fetch permanent history from MongoDB (or local cache)
+                history = self.fetch_history(user_id)
+                memory_context = self.build_memory_context(history)
                 system_prompt = build_system_prompt(user_name)
-                memory_context = self.get_memory_context(user_id)
 
                 full_prompt = (
                     f"{system_prompt}\n"
@@ -254,7 +298,8 @@ class Chat(commands.Cog):
                     f"\nUser: {user_prompt}\nYua:"
                 )
 
-                self.store_message(user_id, "User", user_prompt)
+                # Save the user's message before generating reply
+                self.save_message(user_id, "User", user_prompt)
 
                 reply_text = self.generate_response(full_prompt, system_prompt, user_prompt)
 
@@ -264,7 +309,8 @@ class Chat(commands.Cog):
                         f"Ektu por try koro. 🌸"
                     )
 
-                self.store_message(user_id, "Yua", reply_text)
+                # Save Yua's reply to memory
+                self.save_message(user_id, "Yua", reply_text)
                 await message.reply(reply_text)
 
             except Exception as e:

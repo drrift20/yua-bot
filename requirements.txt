@@ -6,4 +6,5 @@ groq>=1.2.0
 openai>=2.31.0
 python-dotenv>=1.2.2
 requests>=2.33.1
-Flask
+pymongo>=4.6.0
+dnspython>=2.6.0
