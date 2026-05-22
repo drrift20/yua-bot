@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
+from groq import Groq
 from collections import deque
 import os
 import random
@@ -18,7 +19,7 @@ GREETINGS = {"hi", "hello", "hey", "hiya", "heya", "হ্যালো", "হা
 
 COOLDOWN_SECONDS = 5
 
-MODELS_TO_TRY = [
+GEMINI_MODELS = [
     "gemini-2.0-flash",
     "gemini-1.5-flash",
 ]
@@ -54,59 +55,118 @@ class Chat(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+        # --- Gemini Configuration 1 ---
         self.key1 = os.getenv("GEMINI_API_KEY")
+        # --- Gemini Configuration 2 ---
         self.key2 = os.getenv("GEMINI_API_KEY_2")
+        # --- Groq Fallback ---
+        self.groq_key = os.getenv("GROQ_API_KEY")
 
         if not self.key1:
             raise ValueError("GEMINI_API_KEY is not set in Secrets.")
 
-        key_count = sum(1 for k in [self.key1, self.key2] if k)
-        print(f"Loaded {key_count} Gemini API key(s).")
+        gemini_count = sum(1 for k in [self.key1, self.key2] if k)
+        groq_status = "yes" if self.groq_key else "not set"
+        print(f"Loaded {gemini_count} Gemini key(s). Groq fallback: {groq_status}.")
 
         self.user_memory = {}
         self.user_cooldowns = {}
         self.cooldown_warned = set()
 
-    def generate_response(self, prompt: str, user_name: str) -> str:
-        keys = [k for k in [self.key1, self.key2] if k]
+    # ------------------------------------------------------------------
+    # Step 1 & 2 — Try Gemini Key 1, then Gemini Key 2
+    # ------------------------------------------------------------------
+    def _try_gemini(self, api_key: str, key_num: int, prompt: str) -> str:
+        for model_name in GEMINI_MODELS:
+            try:
+                print(f"[Gemini Key {key_num}] Trying model: {model_name}")
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel(
+                    model_name=model_name,
+                    safety_settings=SAFETY_SETTINGS,
+                )
+                response = model.generate_content(prompt)
 
-        for key_num, api_key in enumerate(keys, start=1):
-            for model_name in MODELS_TO_TRY:
                 try:
-                    print(f"[Key {key_num}] Configuring with model: {model_name}")
-                    genai.configure(api_key=api_key)
-                    model = genai.GenerativeModel(
-                        model_name=model_name,
-                        safety_settings=SAFETY_SETTINGS,
-                    )
-                    response = model.generate_content(prompt)
+                    text = response.text
+                except Exception as inner:
+                    print(f"[Gemini Key {key_num}] model={model_name}: response.text error: {inner}")
+                    text = None
 
-                    try:
-                        text = response.text
-                    except Exception as inner:
-                        print(f"[Key {key_num}] model={model_name}: response.text error: {inner}")
-                        text = None
+                if text and text.strip():
+                    print(f"[Gemini Key {key_num}] model={model_name}: SUCCESS")
+                    return text.strip()
+                else:
+                    print(f"[Gemini Key {key_num}] model={model_name}: empty response, trying next.")
 
-                    if text and text.strip():
-                        print(f"[Key {key_num}] model={model_name}: SUCCESS")
-                        return text.strip()
-                    else:
-                        print(f"[Key {key_num}] model={model_name}: empty response, trying next.")
-
-                except Exception as e:
-                    err = str(e)
-                    if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                        print(f"[Key {key_num}] model={model_name}: QUOTA ERROR — {e}")
-                    elif "503" in err or "UNAVAILABLE" in err:
-                        print(f"[Key {key_num}] model={model_name}: SERVER UNAVAILABLE — {e}")
-                    elif "404" in err or "NOT_FOUND" in err:
-                        print(f"[Key {key_num}] model={model_name}: MODEL NOT FOUND — {e}")
-                    else:
-                        print(f"[Key {key_num}] model={model_name}: UNKNOWN ERROR — {e}")
-
-        print("All keys and models failed.")
+            except Exception as e:
+                err = str(e)
+                if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                    print(f"[Gemini Key {key_num}] model={model_name}: QUOTA ERROR — {e}")
+                elif "503" in err or "UNAVAILABLE" in err:
+                    print(f"[Gemini Key {key_num}] model={model_name}: SERVER UNAVAILABLE — {e}")
+                elif "404" in err or "NOT_FOUND" in err:
+                    print(f"[Gemini Key {key_num}] model={model_name}: MODEL NOT FOUND — {e}")
+                else:
+                    print(f"[Gemini Key {key_num}] model={model_name}: UNKNOWN ERROR — {e}")
         return ""
 
+    # ------------------------------------------------------------------
+    # Step 3 — Groq fallback (Llama 3)
+    # ------------------------------------------------------------------
+    def _try_groq(self, system_prompt: str, user_prompt: str) -> str:
+        if not self.groq_key:
+            print("[Groq] No GROQ_API_KEY set, skipping.")
+            return ""
+        try:
+            print("[Groq] Trying llama-3.3-70b-versatile...")
+            client = Groq(api_key=self.groq_key)
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_prompt},
+                ],
+                max_tokens=512,
+                temperature=0.9,
+            )
+            text = completion.choices[0].message.content
+            if text and text.strip():
+                print("[Groq] SUCCESS")
+                return text.strip()
+            else:
+                print("[Groq] empty response.")
+        except Exception as e:
+            print(f"[Groq] ERROR — {e}")
+        return ""
+
+    # ------------------------------------------------------------------
+    # Master generate — tries all three sources in order
+    # ------------------------------------------------------------------
+    def generate_response(self, full_prompt: str, system_prompt: str, user_prompt: str) -> str:
+        # Step 1: Gemini Key 1
+        result = self._try_gemini(self.key1, 1, full_prompt)
+        if result:
+            return result
+
+        # Step 2: Gemini Key 2
+        if self.key2:
+            result = self._try_gemini(self.key2, 2, full_prompt)
+            if result:
+                return result
+
+        # Step 3: Groq (Llama 3) fallback
+        result = self._try_groq(system_prompt, user_prompt)
+        if result:
+            return result
+
+        # Step 4: Everything failed
+        print("All sources failed.")
+        return ""
+
+    # ------------------------------------------------------------------
+    # Memory helpers
+    # ------------------------------------------------------------------
     def get_memory_context(self, user_id: int) -> str:
         history = self.user_memory.get(user_id)
         if not history:
@@ -121,13 +181,18 @@ class Chat(commands.Cog):
             self.user_memory[user_id] = deque(maxlen=5)
         self.user_memory[user_id].append({"role": role, "content": content})
 
+    # ------------------------------------------------------------------
+    # Cooldown helpers
+    # ------------------------------------------------------------------
     def is_on_cooldown(self, user_id: int) -> bool:
-        last = self.user_cooldowns.get(user_id, 0)
-        return (time.monotonic() - last) < COOLDOWN_SECONDS
+        return (time.monotonic() - self.user_cooldowns.get(user_id, 0)) < COOLDOWN_SECONDS
 
     def update_cooldown(self, user_id: int):
         self.user_cooldowns[user_id] = time.monotonic()
 
+    # ------------------------------------------------------------------
+    # on_message
+    # ------------------------------------------------------------------
     @commands.Cog.listener()
     async def on_message(self, message):
         if message.author.bot:
@@ -152,44 +217,45 @@ class Chat(commands.Cog):
 
         async with message.channel.typing():
             try:
-                prompt = (
+                user_prompt = (
                     message.content
                     .replace(f"<@!{self.bot.user.id}>", "")
                     .replace(f"<@{self.bot.user.id}>", "")
                     .strip()
                 )
-                if not prompt:
-                    prompt = "Hello!"
+                if not user_prompt:
+                    user_prompt = "Hello!"
 
                 mood_emoji = random.choice(list(MOODS.values()))
 
-                if prompt.lower() in GREETINGS:
+                if user_prompt.lower() in GREETINGS:
                     greeting = (
                         f"Ara ara, {user_name}~! {mood_emoji} "
                         f"Ami tomar jonno wait korchilam! ❤️"
                     )
                     await message.reply(greeting)
-                    self.store_message(user_id, "User", prompt)
+                    self.store_message(user_id, "User", user_prompt)
                     self.store_message(user_id, "Yua", greeting)
                     return
 
+                system_prompt = build_system_prompt(user_name)
                 memory_context = self.get_memory_context(user_id)
 
                 full_prompt = (
-                    f"{build_system_prompt(user_name)}\n"
+                    f"{system_prompt}\n"
                     f"Current mood emoji: {mood_emoji}\n"
                     f"{memory_context}"
-                    f"\nUser: {prompt}\nYua:"
+                    f"\nUser: {user_prompt}\nYua:"
                 )
 
-                self.store_message(user_id, "User", prompt)
+                self.store_message(user_id, "User", user_prompt)
 
-                reply_text = self.generate_response(full_prompt, user_name)
+                reply_text = self.generate_response(full_prompt, system_prompt, user_prompt)
 
                 if not reply_text:
                     reply_text = (
-                        f"Gomenasai, {user_name}! 🌸 "
-                        f"Amar brain ekhon ektu tired, ektu por abar kotha boli?"
+                        f"Amar brain asholei ekhon kaj korche na, {user_name}! "
+                        f"Ektu por try koro. 🌸"
                     )
 
                 self.store_message(user_id, "Yua", reply_text)
@@ -199,8 +265,8 @@ class Chat(commands.Cog):
                 print(f"Unexpected on_message error: {e}")
                 try:
                     await message.reply(
-                        f"Gomenasai, {user_name}! 🌸 "
-                        f"Amar brain ekhon ektu tired, ektu por abar kotha boli?"
+                        f"Amar brain asholei ekhon kaj korche na, {user_name}! "
+                        f"Ektu por try koro. 🌸"
                     )
                 except Exception:
                     pass
