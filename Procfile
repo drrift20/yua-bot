@@ -1,1 +1,1 @@
-worker: cd yua-bot && python main.py
+web: cd yua-bot && python main.py
