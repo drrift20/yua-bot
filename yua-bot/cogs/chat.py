@@ -118,26 +118,32 @@ class Chat(commands.Cog):
         if not self.groq_key:
             print("[Groq] No GROQ_API_KEY set, skipping.")
             return ""
-        try:
-            print("[Groq] Trying llama-3.3-70b-versatile...")
-            client = Groq(api_key=self.groq_key)
-            completion = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_prompt},
-                ],
-                max_tokens=512,
-                temperature=0.9,
-            )
-            text = completion.choices[0].message.content
-            if text and text.strip():
-                print("[Groq] SUCCESS")
-                return text.strip()
-            else:
-                print("[Groq] empty response.")
-        except Exception as e:
-            print(f"[Groq] ERROR — {e}")
+        groq_models = [
+            "llama3-8b-8192",
+            "mixtral-8x7b-32768",
+            "llama-3.3-70b-versatile",
+        ]
+        client = Groq(api_key=self.groq_key)
+        for groq_model in groq_models:
+            try:
+                print(f"[Groq] Trying {groq_model}...")
+                completion = client.chat.completions.create(
+                    model=groq_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_prompt},
+                    ],
+                    max_tokens=512,
+                    temperature=0.9,
+                )
+                text = completion.choices[0].message.content
+                if text and text.strip():
+                    print(f"[Groq] {groq_model}: SUCCESS")
+                    return text.strip()
+                else:
+                    print(f"[Groq] {groq_model}: empty response, trying next.")
+            except Exception as e:
+                print(f"[Groq] {groq_model}: ERROR — {e}")
         return ""
 
     # ------------------------------------------------------------------
