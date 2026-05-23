@@ -267,6 +267,11 @@ class Chat(commands.Cog):
         self.user_cooldowns: dict = {}
         self.cooldown_warned: set = set()
 
+        # Deduplication guard — prevents the same message.id from ever being
+        # processed more than once (guards against multiple listener firings
+        # or momentary duplicate bot instances during workflow restarts)
+        self._seen_ids: set = set()
+
     # ------------------------------------------------------------------
     # Async wrappers — these await thread-pool execution so the event
     # loop is NEVER blocked by database or HTTP calls.
@@ -322,6 +327,16 @@ class Chat(commands.Cog):
 
         if message.author.bot:
             return
+
+        # ── Deduplication guard ───────────────────────────────────────────────
+        # Drops any repeated firing for the same message.id (multiple listener
+        # registrations or overlapping bot instances during restarts).
+        if message.id in self._seen_ids:
+            print(f"[on_message] DUPLICATE skipped mid={message.id}")
+            return
+        self._seen_ids.add(message.id)
+        if len(self._seen_ids) > 500:   # prevent unbounded memory growth
+            self._seen_ids.clear()
 
         # ── Trigger detection ────────────────────────────────────────────────
         # Responds when:
