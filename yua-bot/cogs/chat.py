@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
-import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
+from google import genai
+from google.genai import types
 from groq import Groq
 from pymongo import MongoClient, ASCENDING
 from collections import deque
@@ -28,12 +28,12 @@ GEMINI_MODELS = [
     "gemini-1.5-flash",
 ]
 
-SAFETY_SETTINGS = {
-    HarmCategory.HARM_CATEGORY_HARASSMENT:        HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_HATE_SPEECH:       HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-}
+SAFETY_SETTINGS = [
+    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT",        threshold="BLOCK_NONE"),
+    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH",       threshold="BLOCK_NONE"),
+    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+]
 
 
 def build_system_prompt(user_name: str) -> str:
@@ -104,15 +104,17 @@ def _sync_save_message(mongo_col, local_memory: dict, user_id: int, role: str, c
 
 def _sync_try_gemini(api_key: str, key_num: int, prompt: str) -> str:
     """Synchronous: attempt Gemini generation. Called via asyncio.to_thread."""
+    client = genai.Client(api_key=api_key)
     for model_name in GEMINI_MODELS:
         try:
             print(f"[Gemini Key {key_num}] Trying model: {model_name}")
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                safety_settings=SAFETY_SETTINGS,
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    safety_settings=SAFETY_SETTINGS,
+                ),
             )
-            response = model.generate_content(prompt)
             try:
                 text = response.text
             except Exception:
