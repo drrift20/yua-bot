@@ -4,7 +4,7 @@ from google import genai
 from google.genai import types
 from groq import Groq
 from pymongo import MongoClient, ASCENDING
-from collections import deque
+from collections import deque, OrderedDict
 import asyncio
 import traceback
 import os
@@ -156,8 +156,13 @@ def _sync_try_gemini(api_key: str, key_num: int, prompt: str) -> str:
                 print(f"[Gemini Key {key_num}] model={model_name}: empty response, trying next.")
         except Exception:
             err = str(traceback.format_exc())
-            if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                print(f"[Gemini Key {key_num}] model={model_name}: QUOTA ERROR")
+            if "403" in err or "PERMISSION_DENIED" in err or "CONSUMER_SUSPENDED" in err:
+                # Key is suspended/revoked — no point trying other models on same key
+                print(f"[Gemini Key {key_num}] KEY SUSPENDED/REVOKED — skipping all models on this key")
+                traceback.print_exc()
+                return ""
+            elif "429" in err or "RESOURCE_EXHAUSTED" in err:
+                print(f"[Gemini Key {key_num}] model={model_name}: QUOTA EXHAUSTED")
             elif "503" in err or "UNAVAILABLE" in err:
                 print(f"[Gemini Key {key_num}] model={model_name}: SERVER UNAVAILABLE")
             elif "404" in err or "NOT_FOUND" in err:
@@ -174,9 +179,9 @@ def _sync_try_groq(groq_key: str, system_prompt: str, user_prompt: str) -> str:
         print("[Groq] No GROQ_API_KEY set, skipping.")
         return ""
     groq_models = [
-        "llama3-8b-8192",
         "llama-3.1-8b-instant",
         "llama-3.3-70b-versatile",
+        "llama3-70b-8192",
     ]
     client = Groq(api_key=groq_key)
     for groq_model in groq_models:
@@ -211,10 +216,14 @@ def _sync_generate_response(
     result = _sync_try_gemini(key1, 1, full_prompt)
     if result:
         return result
-    if key2:
+    # Only try Key 2 if it exists AND is different from Key 1.
+    # If both env vars hold the same value there is no point in a second attempt.
+    if key2 and key2 != key1:
         result = _sync_try_gemini(key2, 2, full_prompt)
         if result:
             return result
+    elif key2 == key1:
+        print("[generate] Key 2 is identical to Key 1 — skipping duplicate attempt.")
     result = _sync_try_groq(groq_key, system_prompt, user_prompt)
     if result:
         return result
@@ -266,10 +275,10 @@ class Chat(commands.Cog):
         self.user_cooldowns: dict = {}
         self.cooldown_warned: set = set()
 
-        # Deduplication guard — prevents the same message.id from ever being
-        # processed more than once (guards against multiple listener firings
-        # or momentary duplicate bot instances during workflow restarts)
-        self._seen_ids: set = set()
+        # Deduplication guard — FIFO OrderedDict so old entries are evicted
+        # one-by-one instead of clearing the whole set (which reopened the
+        # duplicate window for the next 500 messages after every clear).
+        self._seen_ids: OrderedDict = OrderedDict()
 
     # ------------------------------------------------------------------
     # Async wrappers — these await thread-pool execution so the event
@@ -327,15 +336,16 @@ class Chat(commands.Cog):
         if message.author.bot:
             return
 
-        # ── Deduplication guard ───────────────────────────────────────────────
-        # Drops any repeated firing for the same message.id (multiple listener
-        # registrations or overlapping bot instances during restarts).
+        # ── Deduplication guard (FIFO) ────────────────────────────────────────
+        # Drops any repeated firing for the same message.id.
+        # Uses OrderedDict so oldest entry is evicted one-at-a-time — never
+        # clears the whole set which would re-open the duplicate window.
         if message.id in self._seen_ids:
             print(f"[on_message] DUPLICATE skipped mid={message.id}")
             return
-        self._seen_ids.add(message.id)
-        if len(self._seen_ids) > 500:   # prevent unbounded memory growth
-            self._seen_ids.clear()
+        self._seen_ids[message.id] = None
+        if len(self._seen_ids) > 1000:
+            self._seen_ids.popitem(last=False)  # evict oldest entry only
 
         # ── Trigger detection ────────────────────────────────────────────────
         # Responds when:
@@ -421,6 +431,12 @@ class Chat(commands.Cog):
                         f"Amar brain asholei ekhon kaj korche na, {user_name}! "
                         f"Ektu por try koro. 🌸"
                     )
+
+                # Enforce Discord's 2000-char hard limit before sending.
+                # Truncating here prevents the reply() call from throwing,
+                # which would trigger the except block and send a second message.
+                if len(reply_text) > 1990:
+                    reply_text = reply_text[:1990] + "…"
 
                 # Save Yua's reply (non-blocking)
                 await self.save_message(user_id, "Yua", reply_text)
