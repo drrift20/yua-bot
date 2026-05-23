@@ -1,0 +1,27 @@
+Role: Senior Backend Engineer & Discord Bot Systems Architect
+
+Task:
+Investigate and eliminate a critical multi-guild context bug where the AI Bot ("Yua") responds flawlessly in the development/testing server, but completely ignores or drops message events in any other external Discord server (Guild). 
+
+Current Bug Analysis:
+1. Permissions and Gateway Intents are 100% correct (the bot can read message events, as verified during initial diagnostics).
+2. The bot works perfectly in the home testing server, but remains totally silent/inactive when receiving messages or pings (@Yua) in secondary servers.
+3. Replit Agent previously optimized the async thread loop using asyncio.to_thread(), but the multi-server failure persists. This proves the issue is NOT thread blocking, but a structural logic error or strict hardcoded filter constraint in the codebase.
+
+Instructions for Replit Agent (Execute systematically):
+
+Step 1: Check for Hardcoded Server/Channel Filters (Most Critical)
+- Search the entire codebase (especially inside the main client/cog file, `on_message` event handlers, or command middleware listeners) for any hardcoded integer IDs representing Guild IDs, Channel IDs, or Role IDs.
+- Look for logic structures like `if message.guild.id != DEV_GUILD_ID: return` or `if message.channel.id != TESTING_CHANNEL_ID: return`.
+- If found, remove these strict conditional gatekeepers so that the bot processes incoming message payloads dynamically for ALL guilds.
+
+Step 2: Inspect MongoDB Session Isolation Matrix
+- Look into the database utility functions where user history is retrieved or stored (e.g., `fetch_history`, `save_message`, or equivalent tracking logic).
+- Ensure that the query filters look up context based on the current dynamic `message.guild.id` or `message.channel.id`. 
+- If the database setup was initially built around a single server's document schema layout, refactor the repository layer to dynamically handle upside insertion/upsert operations for any newly joined server/channel context matrix without throwing unique document indexing or validation path errors.
+
+Step 3: Verify Global System Exception Catching
+- Inside the core `on_message` block, wrap the absolute entire message processing lifecycle (from message parsing to database calls, API invocation, and message dispatching) inside a clean try/except block.
+- If ANY exception occurs during parsing/execution for a secondary guild, use `traceback.print_exc()` to output the full stack trace to the live terminal console. Do not let exceptions swallow silently.
+
+Refactor the code instantly, apply the structural changes cleanly, and restart the system runtime process.

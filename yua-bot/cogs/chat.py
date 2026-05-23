@@ -281,26 +281,51 @@ class Chat(commands.Cog):
     # ------------------------------------------------------------------
     @commands.Cog.listener()
     async def on_message(self, message):
+        # ── Raw intake log: fires for EVERY non-bot message the bot receives ──
+        guild_id  = message.guild.id   if message.guild   else "DM"
+        guild_name = message.guild.name if message.guild  else "DM"
+        print(
+            f"[on_message] guild={guild_id}({guild_name}) "
+            f"channel={message.channel.id} "
+            f"author={message.author.id}({message.author.display_name}) "
+            f"bot={message.author.bot}"
+        )
+
         if message.author.bot:
             return
 
-        if not (self.bot.user.mentioned_in(message) or isinstance(message.channel, discord.DMChannel)):
+        # Explicit ID check — does NOT rely on member cache, unlike mentioned_in()
+        is_dm          = isinstance(message.channel, discord.DMChannel)
+        bot_mentioned  = any(u.id == self.bot.user.id for u in message.mentions)
+
+        print(
+            f"[on_message] guild={guild_id} is_dm={is_dm} "
+            f"bot_mentioned={bot_mentioned} mentions={[u.id for u in message.mentions]}"
+        )
+
+        if not (bot_mentioned or is_dm):
             return
 
         user_name = message.author.display_name
-        user_id = message.author.id
+        user_id   = message.author.id
 
-        # Cooldown check
+        # Cooldown check — wrapped so a Discord API error here never crashes the handler
         if self.is_on_cooldown(user_id):
             if user_id not in self.cooldown_warned:
                 self.cooldown_warned.add(user_id)
-                await message.reply(
-                    f"Ektu thamo, {user_name}! 🌸 Eto druto kotha bolle ami lojja pai..."
-                )
+                try:
+                    await message.reply(
+                        f"Ektu thamo, {user_name}! 🌸 Eto druto kotha bolle ami lojja pai..."
+                    )
+                except Exception:
+                    print(f"[on_message] cooldown reply failed guild={guild_id}:")
+                    traceback.print_exc()
             return
 
         self.update_cooldown(user_id)
         self.cooldown_warned.discard(user_id)
+
+        print(f"[on_message] PROCESSING guild={guild_id} user={user_id}({user_name})")
 
         async with message.channel.typing():
             try:
