@@ -294,20 +294,20 @@ class Chat(commands.Cog):
         if message.author.bot:
             return
 
-        # Explicit ID check — does NOT rely on member cache, unlike mentioned_in()
-        # Also catches plain-text "@yua" typed without selecting from the dropdown
+        # ── Trigger detection ────────────────────────────────────────────────
+        # Responds when:
+        #   • message starts with "yua " (case-insensitive) in any server
+        #   • message is sent as a DM (no prefix required)
         is_dm          = isinstance(message.channel, discord.DMChannel)
-        bot_mentioned  = (
-            any(u.id == self.bot.user.id for u in message.mentions)
-            or "@yua" in message.content.lower()
-        )
+        content_lower  = message.content.strip().lower()
+        has_prefix     = content_lower.startswith("yua ")
 
         print(
             f"[on_message] guild={guild_id} is_dm={is_dm} "
-            f"bot_mentioned={bot_mentioned} mentions={[u.id for u in message.mentions]}"
+            f"has_prefix={has_prefix} content_preview={message.content[:40]!r}"
         )
 
-        if not (bot_mentioned or is_dm):
+        if not (has_prefix or is_dm):
             return
 
         user_name = message.author.display_name
@@ -333,12 +333,12 @@ class Chat(commands.Cog):
 
         async with message.channel.typing():
             try:
-                user_prompt = (
-                    message.content
-                    .replace(f"<@!{self.bot.user.id}>", "")
-                    .replace(f"<@{self.bot.user.id}>", "")
-                    .strip()
-                )
+                # Strip "yua " prefix if present; DM messages pass through as-is
+                if has_prefix:
+                    user_prompt = message.content.strip()[4:].strip()
+                else:
+                    user_prompt = message.content.strip()
+
                 if not user_prompt:
                     user_prompt = "Hello!"
 
