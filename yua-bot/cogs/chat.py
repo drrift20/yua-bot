@@ -295,8 +295,12 @@ class Chat(commands.Cog):
             return
 
         # Explicit ID check — does NOT rely on member cache, unlike mentioned_in()
+        # Also catches plain-text "@yua" typed without selecting from the dropdown
         is_dm          = isinstance(message.channel, discord.DMChannel)
-        bot_mentioned  = any(u.id == self.bot.user.id for u in message.mentions)
+        bot_mentioned  = (
+            any(u.id == self.bot.user.id for u in message.mentions)
+            or "@yua" in message.content.lower()
+        )
 
         print(
             f"[on_message] guild={guild_id} is_dm={is_dm} "
