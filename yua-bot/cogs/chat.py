@@ -147,7 +147,7 @@ def _sync_try_groq(groq_key: str, system_prompt: str, user_prompt: str) -> str:
         return ""
     groq_models = [
         "llama3-8b-8192",
-        "mixtral-8x7b-32768",
+        "llama-3.1-8b-instant",
         "llama-3.3-70b-versatile",
     ]
     client = Groq(api_key=groq_key)
