@@ -1,0 +1,21 @@
+Role: Expert Python Discord Bot Developer & Systems Engineer
+
+Task: 
+Analyze the existing codebase for our Discord AI Bot ("Yua") and fix a critical runtime bug where the bot stops responding after the first message/interaction in newly joined external servers (Guilds), despite working perfectly and continuously in the primary/testing server.
+
+Context & Symptoms:
+1. The bot uses `discord.py` (or discord.js), MongoDB for storing conversation context/history, and the Gemini API for content generation.
+2. Bug behavior: In a newly added server, the bot successfully responds to the very first user message ("Hello" or any initial prompt). However, immediately after that first turn, it freezes, crashes silently, or ignores all consecutive/subsequent messages from that server.
+3. In the development/testing server, the bot handles multi-turn continuous conversations perfectly without any state lockup.
+
+Suspected Root Causes to Investigate & Fix:
+- Database Schema/Queries: Check if MongoDB session context tracking or channel/guild identity storage dynamically creates new rows properly. Look for hardcoded Guild IDs or Channel IDs that might be forcing state evaluation only for the testing server.
+- Asynchronous Blocking: Ensure the Gemini API callback loop or MongoDB database fetch/write operations are fully asynchronous and non-blocking (`await`). Check if a synchronous operation is freezing the event thread.
+- Gateway Intents & Message Parsing: Verify that `intents.message_content` is properly initialized and propagated across dynamically fetched guild objects.
+- Context Token Length / Crash Handling: Inspect the `on_message` exception blocks. If a secondary server throws a schema structure parsing error during the second message database pipeline write, ensure it catches the exception, logs it to the terminal, and does not permanently halt the listener.
+
+Instructions for Replit Agent:
+1. Thoroughly review the `on_message` event listener logic, current database schema configuration, and connection initialization.
+2. Fix any hardcoded server/channel filters or broken MongoDB document key validation logic.
+3. Add robust, explicit error handling/try-except blocks inside the continuous chat generation function so that any database or API failures print exact traceback streams directly to the console instead of silent freezing.
+4. Refactor the code cleanly, run tests, and ensure multi-guild global dynamic session synchronization works seamlessly.

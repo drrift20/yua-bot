@@ -5,6 +5,8 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from groq import Groq
 from pymongo import MongoClient, ASCENDING
 from collections import deque
+import asyncio
+import traceback
 import os
 import random
 import time
@@ -53,6 +55,147 @@ def build_system_prompt(user_name: str) -> str:
     )
 
 
+# ===========================================================================
+# Blocking I/O functions — all run in a thread pool via asyncio.to_thread()
+# so they NEVER block the Discord event loop.
+# ===========================================================================
+
+def _sync_fetch_history(mongo_col, local_memory: dict, user_id: int) -> list:
+    """Synchronous: fetch last MEMORY_LIMIT messages. Called via asyncio.to_thread."""
+    uid = str(user_id)
+    if mongo_col is not None:
+        try:
+            doc = mongo_col.find_one({"user_id": uid})
+            if doc:
+                return doc.get("messages", [])
+        except Exception:
+            print(f"[MongoDB] fetch_history error for user {uid}:")
+            traceback.print_exc()
+    return list(local_memory.get(user_id, []))
+
+
+def _sync_save_message(mongo_col, local_memory: dict, user_id: int, role: str, content: str):
+    """Synchronous: persist one message. Called via asyncio.to_thread."""
+    uid = str(user_id)
+    entry = {"role": role, "content": content}
+
+    if user_id not in local_memory:
+        local_memory[user_id] = deque(maxlen=MEMORY_LIMIT)
+    local_memory[user_id].append(entry)
+
+    if mongo_col is not None:
+        try:
+            mongo_col.update_one(
+                {"user_id": uid},
+                {
+                    "$push": {
+                        "messages": {
+                            "$each": [entry],
+                            "$slice": -MEMORY_LIMIT,
+                        }
+                    }
+                },
+                upsert=True,
+            )
+        except Exception:
+            print(f"[MongoDB] save_message error for user {uid}:")
+            traceback.print_exc()
+
+
+def _sync_try_gemini(api_key: str, key_num: int, prompt: str) -> str:
+    """Synchronous: attempt Gemini generation. Called via asyncio.to_thread."""
+    for model_name in GEMINI_MODELS:
+        try:
+            print(f"[Gemini Key {key_num}] Trying model: {model_name}")
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                safety_settings=SAFETY_SETTINGS,
+            )
+            response = model.generate_content(prompt)
+            try:
+                text = response.text
+            except Exception:
+                print(f"[Gemini Key {key_num}] model={model_name}: response.text failed:")
+                traceback.print_exc()
+                text = None
+            if text and text.strip():
+                print(f"[Gemini Key {key_num}] model={model_name}: SUCCESS")
+                return text.strip()
+            else:
+                print(f"[Gemini Key {key_num}] model={model_name}: empty response, trying next.")
+        except Exception:
+            err = str(traceback.format_exc())
+            if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                print(f"[Gemini Key {key_num}] model={model_name}: QUOTA ERROR")
+            elif "503" in err or "UNAVAILABLE" in err:
+                print(f"[Gemini Key {key_num}] model={model_name}: SERVER UNAVAILABLE")
+            elif "404" in err or "NOT_FOUND" in err:
+                print(f"[Gemini Key {key_num}] model={model_name}: MODEL NOT FOUND")
+            else:
+                print(f"[Gemini Key {key_num}] model={model_name}: UNKNOWN ERROR")
+            traceback.print_exc()
+    return ""
+
+
+def _sync_try_groq(groq_key: str, system_prompt: str, user_prompt: str) -> str:
+    """Synchronous: attempt Groq generation. Called via asyncio.to_thread."""
+    if not groq_key:
+        print("[Groq] No GROQ_API_KEY set, skipping.")
+        return ""
+    groq_models = [
+        "llama3-8b-8192",
+        "mixtral-8x7b-32768",
+        "llama-3.3-70b-versatile",
+    ]
+    client = Groq(api_key=groq_key)
+    for groq_model in groq_models:
+        try:
+            print(f"[Groq] Trying {groq_model}...")
+            completion = client.chat.completions.create(
+                model=groq_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_prompt},
+                ],
+                max_tokens=512,
+                temperature=0.9,
+            )
+            text = completion.choices[0].message.content
+            if text and text.strip():
+                print(f"[Groq] {groq_model}: SUCCESS")
+                return text.strip()
+            else:
+                print(f"[Groq] {groq_model}: empty response, trying next.")
+        except Exception:
+            print(f"[Groq] {groq_model}: ERROR")
+            traceback.print_exc()
+    return ""
+
+
+def _sync_generate_response(
+    key1: str, key2: str, groq_key: str,
+    full_prompt: str, system_prompt: str, user_prompt: str
+) -> str:
+    """Synchronous: full waterfall through all AI sources. Called via asyncio.to_thread."""
+    result = _sync_try_gemini(key1, 1, full_prompt)
+    if result:
+        return result
+    if key2:
+        result = _sync_try_gemini(key2, 2, full_prompt)
+        if result:
+            return result
+    result = _sync_try_groq(groq_key, system_prompt, user_prompt)
+    if result:
+        return result
+    print("[generate] All sources failed.")
+    return ""
+
+
+# ===========================================================================
+# Cog
+# ===========================================================================
+
 class Chat(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -82,156 +225,49 @@ class Chat(commands.Cog):
                 self.mongo_col = db["memory"]
                 self.mongo_col.create_index([("user_id", ASCENDING)], unique=True)
                 print("MongoDB connected. Permanent memory active.")
-            except Exception as e:
-                print(f"MongoDB connection failed, using in-memory fallback: {e}")
+            except Exception:
+                print("MongoDB connection failed, using in-memory fallback:")
+                traceback.print_exc()
         else:
             print("MONGO_URI not set. Using in-memory memory only.")
 
-        # In-memory fallback (also used as a session cache)
-        self.local_memory = {}
-        self.user_cooldowns = {}
-        self.cooldown_warned = set()
+        # In-memory fallback / session cache
+        self.local_memory: dict = {}
+        self.user_cooldowns: dict = {}
+        self.cooldown_warned: set = set()
 
     # ------------------------------------------------------------------
-    # MongoDB memory helpers
+    # Async wrappers — these await thread-pool execution so the event
+    # loop is NEVER blocked by database or HTTP calls.
     # ------------------------------------------------------------------
-    def fetch_history(self, user_id: int) -> list:
-        """Fetch last MEMORY_LIMIT messages from MongoDB, or local cache."""
-        uid = str(user_id)
-        if self.mongo_col is not None:
-            try:
-                doc = self.mongo_col.find_one({"user_id": uid})
-                if doc:
-                    return doc.get("messages", [])
-            except Exception as e:
-                print(f"[MongoDB] fetch_history error: {e}")
-        # Fallback to local
-        return list(self.local_memory.get(user_id, []))
+    async def fetch_history(self, user_id: int) -> list:
+        return await asyncio.to_thread(
+            _sync_fetch_history, self.mongo_col, self.local_memory, user_id
+        )
 
-    def save_message(self, user_id: int, role: str, content: str):
-        """Append a message and keep only the last MEMORY_LIMIT entries."""
-        uid = str(user_id)
-        entry = {"role": role, "content": content}
+    async def save_message(self, user_id: int, role: str, content: str):
+        await asyncio.to_thread(
+            _sync_save_message, self.mongo_col, self.local_memory, user_id, role, content
+        )
 
-        # Always update local cache too
-        if user_id not in self.local_memory:
-            self.local_memory[user_id] = deque(maxlen=MEMORY_LIMIT)
-        self.local_memory[user_id].append(entry)
+    async def generate_response(
+        self, full_prompt: str, system_prompt: str, user_prompt: str
+    ) -> str:
+        return await asyncio.to_thread(
+            _sync_generate_response,
+            self.key1, self.key2, self.groq_key,
+            full_prompt, system_prompt, user_prompt,
+        )
 
-        if self.mongo_col is not None:
-            try:
-                self.mongo_col.update_one(
-                    {"user_id": uid},
-                    {
-                        "$push": {
-                            "messages": {
-                                "$each": [entry],
-                                "$slice": -MEMORY_LIMIT,
-                            }
-                        }
-                    },
-                    upsert=True,
-                )
-            except Exception as e:
-                print(f"[MongoDB] save_message error: {e}")
-
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
     def build_memory_context(self, history: list) -> str:
-        """Format message history into a prompt context string."""
         if not history:
             return ""
         lines = "\n".join(f"  {m['role']}: {m['content']}" for m in history)
         return f"\nConversation history (oldest to newest):\n{lines}\n"
 
-    # ------------------------------------------------------------------
-    # Step 1 & 2 — Try Gemini Key 1, then Gemini Key 2
-    # ------------------------------------------------------------------
-    def _try_gemini(self, api_key: str, key_num: int, prompt: str) -> str:
-        for model_name in GEMINI_MODELS:
-            try:
-                print(f"[Gemini Key {key_num}] Trying model: {model_name}")
-                genai.configure(api_key=api_key)
-                model = genai.GenerativeModel(
-                    model_name=model_name,
-                    safety_settings=SAFETY_SETTINGS,
-                )
-                response = model.generate_content(prompt)
-                try:
-                    text = response.text
-                except Exception as inner:
-                    print(f"[Gemini Key {key_num}] model={model_name}: response.text error: {inner}")
-                    text = None
-                if text and text.strip():
-                    print(f"[Gemini Key {key_num}] model={model_name}: SUCCESS")
-                    return text.strip()
-                else:
-                    print(f"[Gemini Key {key_num}] model={model_name}: empty response, trying next.")
-            except Exception as e:
-                err = str(e)
-                if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                    print(f"[Gemini Key {key_num}] model={model_name}: QUOTA ERROR — {e}")
-                elif "503" in err or "UNAVAILABLE" in err:
-                    print(f"[Gemini Key {key_num}] model={model_name}: SERVER UNAVAILABLE — {e}")
-                elif "404" in err or "NOT_FOUND" in err:
-                    print(f"[Gemini Key {key_num}] model={model_name}: MODEL NOT FOUND — {e}")
-                else:
-                    print(f"[Gemini Key {key_num}] model={model_name}: UNKNOWN ERROR — {e}")
-        return ""
-
-    # ------------------------------------------------------------------
-    # Step 3 — Groq fallback (Llama 3)
-    # ------------------------------------------------------------------
-    def _try_groq(self, system_prompt: str, user_prompt: str) -> str:
-        if not self.groq_key:
-            print("[Groq] No GROQ_API_KEY set, skipping.")
-            return ""
-        groq_models = [
-            "llama3-8b-8192",
-            "mixtral-8x7b-32768",
-            "llama-3.3-70b-versatile",
-        ]
-        client = Groq(api_key=self.groq_key)
-        for groq_model in groq_models:
-            try:
-                print(f"[Groq] Trying {groq_model}...")
-                completion = client.chat.completions.create(
-                    model=groq_model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user",   "content": user_prompt},
-                    ],
-                    max_tokens=512,
-                    temperature=0.9,
-                )
-                text = completion.choices[0].message.content
-                if text and text.strip():
-                    print(f"[Groq] {groq_model}: SUCCESS")
-                    return text.strip()
-                else:
-                    print(f"[Groq] {groq_model}: empty response, trying next.")
-            except Exception as e:
-                print(f"[Groq] {groq_model}: ERROR — {e}")
-        return ""
-
-    # ------------------------------------------------------------------
-    # Master generate — tries all three sources in order
-    # ------------------------------------------------------------------
-    def generate_response(self, full_prompt: str, system_prompt: str, user_prompt: str) -> str:
-        result = self._try_gemini(self.key1, 1, full_prompt)
-        if result:
-            return result
-        if self.key2:
-            result = self._try_gemini(self.key2, 2, full_prompt)
-            if result:
-                return result
-        result = self._try_groq(system_prompt, user_prompt)
-        if result:
-            return result
-        print("All sources failed.")
-        return ""
-
-    # ------------------------------------------------------------------
-    # Cooldown helpers
-    # ------------------------------------------------------------------
     def is_on_cooldown(self, user_id: int) -> bool:
         return (time.monotonic() - self.user_cooldowns.get(user_id, 0)) < COOLDOWN_SECONDS
 
@@ -239,7 +275,7 @@ class Chat(commands.Cog):
         self.user_cooldowns[user_id] = time.monotonic()
 
     # ------------------------------------------------------------------
-    # on_message
+    # on_message — fully non-blocking
     # ------------------------------------------------------------------
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -252,6 +288,7 @@ class Chat(commands.Cog):
         user_name = message.author.display_name
         user_id = message.author.id
 
+        # Cooldown check
         if self.is_on_cooldown(user_id):
             if user_id not in self.cooldown_warned:
                 self.cooldown_warned.add(user_id)
@@ -276,18 +313,19 @@ class Chat(commands.Cog):
 
                 mood_emoji = random.choice(list(MOODS.values()))
 
+                # Fast greeting path — still saves to memory asynchronously
                 if user_prompt.lower() in GREETINGS:
                     greeting = (
                         f"Ara ara, {user_name}~! {mood_emoji} "
                         f"Ami tomar jonno wait korchilam! ❤️"
                     )
                     await message.reply(greeting)
-                    self.save_message(user_id, "User", user_prompt)
-                    self.save_message(user_id, "Yua", greeting)
+                    await self.save_message(user_id, "User", user_prompt)
+                    await self.save_message(user_id, "Yua", greeting)
                     return
 
-                # Fetch permanent history from MongoDB (or local cache)
-                history = self.fetch_history(user_id)
+                # Fetch permanent history (non-blocking)
+                history = await self.fetch_history(user_id)
                 memory_context = self.build_memory_context(history)
                 system_prompt = build_system_prompt(user_name)
 
@@ -298,10 +336,11 @@ class Chat(commands.Cog):
                     f"\nUser: {user_prompt}\nYua:"
                 )
 
-                # Save the user's message before generating reply
-                self.save_message(user_id, "User", user_prompt)
+                # Save user message (non-blocking, fire before API call)
+                await self.save_message(user_id, "User", user_prompt)
 
-                reply_text = self.generate_response(full_prompt, system_prompt, user_prompt)
+                # Generate response (non-blocking — runs in thread pool)
+                reply_text = await self.generate_response(full_prompt, system_prompt, user_prompt)
 
                 if not reply_text:
                     reply_text = (
@@ -309,19 +348,20 @@ class Chat(commands.Cog):
                         f"Ektu por try koro. 🌸"
                     )
 
-                # Save Yua's reply to memory
-                self.save_message(user_id, "Yua", reply_text)
+                # Save Yua's reply (non-blocking)
+                await self.save_message(user_id, "Yua", reply_text)
                 await message.reply(reply_text)
 
-            except Exception as e:
-                print(f"Unexpected on_message error: {e}")
+            except Exception:
+                print(f"[on_message] Unhandled exception for user={user_id} guild={getattr(message.guild, 'id', 'DM')}:")
+                traceback.print_exc()
                 try:
                     await message.reply(
                         f"Amar brain asholei ekhon kaj korche na, {user_name}! "
                         f"Ektu por try koro. 🌸"
                     )
                 except Exception:
-                    pass
+                    traceback.print_exc()
 
 
 async def setup(bot):
