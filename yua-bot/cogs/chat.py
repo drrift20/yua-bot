@@ -410,13 +410,20 @@ class Chat(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        """Create MongoDB index once the event loop is running."""
-        if self.mongo_col is not None:
+        """Create MongoDB index once the event loop is running — retries once after a short delay to survive transient TLS startup errors."""
+        if self.mongo_col is None:
+            return
+        for attempt in (1, 2):
             try:
+                await asyncio.sleep(2 * (attempt - 1))   # 0s, then 2s
                 await self.mongo_col.create_index("user_id", unique=True)
                 print("[MongoDB] Index on user_id ensured.")
-            except Exception:
-                traceback.print_exc()
+                return
+            except Exception as exc:
+                if attempt == 1:
+                    print(f"[MongoDB] Index creation attempt {attempt} failed ({exc!r}), retrying…")
+                else:
+                    print(f"[MongoDB] Index creation failed after {attempt} attempts — continuing without it.")
 
     # ── DB helpers (motor — fully async, no thread pool needed) ────────────────
 
