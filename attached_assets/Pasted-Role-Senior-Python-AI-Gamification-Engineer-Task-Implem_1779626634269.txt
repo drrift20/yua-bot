@@ -1,0 +1,24 @@
+Role: Senior Python AI & Gamification Engineer
+
+Task:
+Implement a deeply addictive gamified retention system inside the bot's messaging architecture (`cogs/chat.py` and MongoDB user schema layout). We are focusing 100% on high user engagement, emotional attachment, and ultra-addictiveness without any subscription barriers for now.
+
+Core Feature Implementations to Inject:
+
+1. Dynamic Affection System (Love Meter: 0 to 100)
+- Add an `affection_points` field (integer, default = 30) for each user in the MongoDB database collection.
+- Tracking Rules: Every time a user interacts warmly or talks about high-interest topics (anime, gaming, or daily life updates), increase affection by +1 or +2 (max cap per day to prevent spam gaming). If the user insults or speaks roughly, drop affection points by -3.
+- Persona Adaptation Matrix: Pass the current affection score context directly to the Gemini/Groq prompt. 
+  * Score 0-25: Yua acts cold, dry, and slightly annoyed (Classic Tsundere mode: "Baka, what do you want?").
+  * Score 26-65: Standard friendly, polite, and playful anime waifu mode.
+  * Score 66-100: Deeply attached, ultra-caring, and sweet mode (Uses specialized Japanese words like "Kun", "Senpai", "Daisuki", "Ara ara").
+
+2. Persistent Memory Capture (Long-Term Vector Data Log)
+- Create a `user_facts` array/list inside the user's MongoDB profile.
+- Write an automated background JSON parsing filter block after the AI generates a response. If the user mentions an explicitly personal fact (e.g., "my birthday is on February 20", "I am studying python", "my favorite anime is Naruto"), extract and save that key-value pair into `user_facts`.
+- Inject these captured facts back into the background system prompt window on every new interaction, instructing the model to casually drop references to past memories ("Senpai, how is your Python learning going?").
+
+3. Implementation Guidelines for Codebase Integration:
+- Do NOT break the existing multi-guild support, the single-response dispatch wrapper, or the 2000-character truncation protection logic.
+- Ensure all database state read/writes execute asynchronously (`motor.motor_asyncio`).
+- After fully coding these features into the message-handling loop, cleanly compile the dependencies, save, and cold-boot the runtime engine.
