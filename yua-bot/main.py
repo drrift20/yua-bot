@@ -30,6 +30,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} slash command(s).")
+    except Exception as e:
+        print(f"Slash command sync failed: {e}")
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     print(f"API Key Loaded: {bool(os.getenv('GEMINI_API_KEY'))}")
     print("Yua is online! ✨")
@@ -37,6 +42,7 @@ async def on_ready():
 async def main():
     async with bot:
         await bot.load_extension("cogs.chat")
+        await bot.load_extension("cogs.items")
         token = os.environ.get("DISCORD_TOKEN")
         if not token:
             raise ValueError("DISCORD_TOKEN environment variable is not set.")
