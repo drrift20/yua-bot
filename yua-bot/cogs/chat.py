@@ -71,6 +71,28 @@ FACT_PATTERNS = [
 ]
 
 
+# ── Item catalogue ─────────────────────────────────────────────────────────────
+
+ITEM_CATALOGUE = {
+    "common":  ["Common Chocolate", "Common Pocky", "Common Candy", "Common Cookie"],
+    "rare":    ["Rare Flower", "Rare Plushie", "Rare Perfume", "Rare Hairpin"],
+    "premium": ["Premium Coffee", "Premium Matcha", "Premium Ribbon", "Premium Headband"],
+}
+
+_ALL_ITEMS_FLAT   = [i for tier in ITEM_CATALOGUE.values() for i in tier]
+_ITEM_WEIGHTS     = [60]*4 + [30]*4 + [10]*4   # matches catalogue order
+_ITEM_TIER_MAP    = {item: tier for tier, items in ITEM_CATALOGUE.items() for item in items}
+
+GIFT_AFFECTION    = {"common": 3, "rare": 7, "premium": 10}
+DAILY_COOLDOWN    = 86_400   # seconds
+
+GIFT_REPLIES = {
+    "common":  "Ara ara, {name}~ 🌸 A {item}? That's actually kinda sweet! Affection +{boost}~ ❤️",
+    "rare":    "Kyaa~! {name}, a {item} just for me?! 😳✨ My heart is pounding! Affection +{boost}~ ❤️❤️",
+    "premium": "M-Mou, {name}!! A {item}?! Daisuki~! 🌸❤️ I'll treasure this forever! Affection +{boost}~ ❤️❤️❤️",
+}
+
+
 # ── Affection helpers ──────────────────────────────────────────────────────────
 
 def get_affection_tier(points: int) -> str:
@@ -440,6 +462,206 @@ class Chat(commands.Cog):
             full_prompt, system_prompt, user_prompt,
         )
 
+    # ── Item command handlers ──────────────────────────────────────────────────
+
+    async def _cmd_daily(self, message: discord.Message):
+        user_id   = message.author.id
+        user_name = message.author.display_name
+        uid       = str(user_id)
+
+        if self.mongo_col is None:
+            await message.reply(
+                f"Gomen, {user_name}~ 😳 MongoDB isn't connected so I can't save items!"
+            )
+            return
+
+        try:
+            doc = await self.mongo_col.find_one({"user_id": uid}) or {}
+        except Exception:
+            traceback.print_exc()
+            await message.reply(f"Something went wrong, {user_name}~ Try again later! 😳")
+            return
+
+        now        = time.time()
+        last_daily = doc.get("last_daily", 0)
+        elapsed    = now - last_daily
+
+        if elapsed < DAILY_COOLDOWN:
+            remaining      = DAILY_COOLDOWN - elapsed
+            hours, rem     = divmod(int(remaining), 3600)
+            mins           = rem // 60
+            await message.reply(
+                f"Mou, {user_name}~ 😳 You already claimed today! "
+                f"Come back in **{hours}h {mins}m**. I'll be waiting~ 🌸"
+            )
+            return
+
+        item = random.choices(_ALL_ITEMS_FLAT, weights=_ITEM_WEIGHTS, k=1)[0]
+        tier = _ITEM_TIER_MAP[item]
+
+        tier_labels = {"common": "✨ Common", "rare": "💎 Rare", "premium": "👑 Premium"}
+
+        try:
+            await self.mongo_col.update_one(
+                {"user_id": uid},
+                {
+                    "$set":  {"last_daily": now, "display_name": user_name},
+                    "$push": {"inventory": item},
+                },
+                upsert=True,
+            )
+        except Exception:
+            traceback.print_exc()
+            await message.reply(f"Something went wrong saving your item, {user_name}~ 😳")
+            return
+
+        print(f"[Daily] uid={uid}({user_name}) received [{tier}] {item!r}")
+        await message.reply(
+            f"🎁 **Daily Reward!**\n"
+            f"Ara ara, {user_name}~ 🌸 Here's your gift for today!\n\n"
+            f"**{item}** ({tier_labels[tier]})\n\n"
+            f"Type `yua gift {item}` to give it to me~ ❤️\n"
+            f"*(Come back in 24 hours for your next reward!)*"
+        )
+
+    async def _cmd_gift(self, message: discord.Message, item_name: str):
+        user_id   = message.author.id
+        user_name = message.author.display_name
+        uid       = str(user_id)
+
+        if self.mongo_col is None:
+            await message.reply(
+                f"Gomen, {user_name}~ 😳 MongoDB isn't connected so I can't check your inventory!"
+            )
+            return
+
+        if not item_name:
+            await message.reply(
+                f"Nani, {user_name}~ 😳 You forgot to say what to gift!\n"
+                f"Try: `yua gift <item name>` ❤️"
+            )
+            return
+
+        try:
+            doc = await self.mongo_col.find_one({"user_id": uid}) or {}
+        except Exception:
+            traceback.print_exc()
+            await message.reply(f"Something went wrong, {user_name}~ Try again later! 😳")
+            return
+
+        inventory: list = doc.get("inventory", [])
+
+        if item_name not in inventory:
+            if inventory:
+                inv_display = "\n".join(f"  • {i}" for i in inventory)
+                await message.reply(
+                    f"Hmm, {user_name}~ 🌸 You don't have **{item_name}** in your inventory!\n\n"
+                    f"**Your items:**\n{inv_display}"
+                )
+            else:
+                await message.reply(
+                    f"Hmm, {user_name}~ 🌸 You don't have **{item_name}** — "
+                    f"your inventory is empty! Try `yua daily` first ❤️"
+                )
+            return
+
+        tier = _ITEM_TIER_MAP.get(item_name)
+        if tier is None:
+            await message.reply(f"That doesn't look like a valid item, {user_name}~ 😳")
+            return
+
+        boost = GIFT_AFFECTION[tier]
+
+        inventory_copy = inventory.copy()
+        inventory_copy.remove(item_name)
+
+        old_aff = doc.get("affection_points", AFFECTION_DEFAULT)
+        new_aff = min(100, old_aff + boost)
+
+        try:
+            await self.mongo_col.update_one(
+                {"user_id": uid},
+                {
+                    "$set": {
+                        "inventory":        inventory_copy,
+                        "affection_points": new_aff,
+                        "display_name":     user_name,
+                    },
+                },
+                upsert=True,
+            )
+        except Exception:
+            traceback.print_exc()
+            await message.reply(f"Something went wrong saving the gift, {user_name}~ 😳")
+            return
+
+        # Mirror into local in-memory cache so chat context is immediately consistent
+        self.local_affection[user_id] = new_aff
+
+        print(
+            f"[Gift] uid={uid}({user_name}) gifted [{tier}] {item_name!r} "
+            f"affection {old_aff}→{new_aff} (+{boost})"
+        )
+
+        reply = GIFT_REPLIES[tier].format(name=user_name, item=item_name, boost=boost)
+        await message.reply(
+            f"{reply}\n"
+            f"*(Affection: {old_aff} → **{new_aff}**/100)*"
+        )
+
+    async def _cmd_leaderboard(self, message: discord.Message):
+        if self.mongo_col is None:
+            await message.reply(
+                "Gomen~ 😳 MongoDB isn't connected so I can't show the leaderboard!"
+            )
+            return
+
+        try:
+            cursor   = self.mongo_col.find(
+                {"affection_points": {"$exists": True}},
+                {"user_id": 1, "affection_points": 1, "display_name": 1},
+            ).sort("affection_points", -1).limit(10)
+            top_docs = await cursor.to_list(length=10)
+        except Exception:
+            traceback.print_exc()
+            await message.reply("Something went wrong fetching the leaderboard~ 😳 Try again!")
+            return
+
+        if not top_docs:
+            await message.reply(
+                "No data yet~ 🌸 Start chatting with me to appear on the leaderboard!"
+            )
+            return
+
+        medal = {1: "🥇", 2: "🥈", 3: "🥉"}
+        lines = []
+
+        for rank, entry in enumerate(top_docs, start=1):
+            uid_int      = int(entry["user_id"])
+            stored_name  = entry.get("display_name", f"User {uid_int}")
+            affection    = entry.get("affection_points", 0)
+
+            display_name = stored_name
+            if message.guild:
+                member = message.guild.get_member(uid_int)
+                if member is None:
+                    try:
+                        member = await message.guild.fetch_member(uid_int)
+                    except Exception:
+                        pass
+                if member:
+                    display_name = member.display_name
+
+            prefix = medal.get(rank, f"#{rank}")
+            lines.append(f"{prefix} **{display_name}** — ❤️ {affection}/100")
+
+        board = "\n".join(lines)
+        await message.reply(
+            f"🌸 **Affection Leaderboard** 🌸\n\n"
+            f"{board}\n\n"
+            f"*Chat with me and send gifts to climb the ranks~*"
+        )
+
     # ── on_message ────────────────────────────────────────────────────────────
 
     @commands.Cog.listener()
@@ -507,6 +729,18 @@ class Chat(commands.Cog):
                     user_prompt = message.content.strip()
                 if not user_prompt:
                     user_prompt = "Hello!"
+
+                # ── Item command dispatch ──────────────────────────────────
+                lp = user_prompt.lower().strip()
+                if lp == "daily":
+                    await self._cmd_daily(message)
+                    return
+                if lp.startswith("gift "):
+                    await self._cmd_gift(message, user_prompt[5:].strip())
+                    return
+                if lp in ("leaderboard", "top"):
+                    await self._cmd_leaderboard(message)
+                    return
 
                 mood_emoji = random.choice(list(MOODS.values()))
 
