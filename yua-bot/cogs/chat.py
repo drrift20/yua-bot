@@ -6,6 +6,7 @@ from groq import Groq
 from motor.motor_asyncio import AsyncIOMotorClient
 from collections import deque, OrderedDict
 import asyncio
+import aiohttp
 import traceback
 import os
 import re
@@ -91,6 +92,22 @@ GIFT_REPLIES = {
     "rare":    "Kyaa~! {name}, a {item} just for me?! 😳✨ My heart is pounding! Affection +{boost}~ ❤️❤️",
     "premium": "M-Mou, {name}!! A {item}?! Daisuki~! 🌸❤️ I'll treasure this forever! Affection +{boost}~ ❤️❤️❤️",
 }
+
+# ── Waifu.pics Visual Engine ───────────────────────────────────────────────────
+
+WAIFU_PICS_ENDPOINTS = {
+    "cold":     "https://api.waifu.pics/sfw/poke",
+    "friendly": "https://api.waifu.pics/sfw/happy",
+    "attached": "https://api.waifu.pics/sfw/blush",
+}
+
+EMBED_COLORS = {
+    "cold":     0x9DB4C0,   # cool grey-blue
+    "friendly": 0xFFB6C1,   # warm pink
+    "attached": 0xFF69B4,   # deep rose
+}
+
+WAIFU_API_TIMEOUT = aiohttp.ClientTimeout(total=4)   # fail fast, never block chat
 
 # ── Late-Night Companion Mode ───────────────────────────────────────────────────
 
@@ -766,6 +783,27 @@ class Chat(commands.Cog):
             f"*Chat with me and send gifts to climb the ranks~*"
         )
 
+    # ── Visual engine ──────────────────────────────────────────────────────────
+
+    async def _fetch_waifu_gif(self, tier: str) -> str | None:
+        url = WAIFU_PICS_ENDPOINTS.get(tier, WAIFU_PICS_ENDPOINTS["friendly"])
+        try:
+            async with aiohttp.ClientSession(timeout=WAIFU_API_TIMEOUT) as session:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        gif_url = data.get("url")
+                        if gif_url:
+                            print(f"[Waifu.pics] [{tier}] fetched: {gif_url}")
+                            return gif_url
+                    print(f"[Waifu.pics] [{tier}] non-200 status: {resp.status}")
+        except asyncio.TimeoutError:
+            print(f"[Waifu.pics] [{tier}] timed out — skipping gif")
+        except Exception:
+            print(f"[Waifu.pics] [{tier}] error — skipping gif")
+            traceback.print_exc()
+        return None
+
     # ── Engagement helpers ─────────────────────────────────────────────────────
 
     async def _get_top_user_cached(self, guild_id: int) -> dict | None:
@@ -1078,11 +1116,29 @@ class Chat(commands.Cog):
                     )
 
                 # ── Discord 2000-char hard limit ──────────────────────────────
-                if len(reply_text) > 1990:
-                    reply_text = reply_text[:1990] + "…"
+                if len(reply_text) > 4096:
+                    reply_text = reply_text[:4093] + "…"
 
-                # ── Send reply ────────────────────────────────────────────────
-                await message.reply(reply_text)
+                # ── Visual engine: fetch tier gif + build embed ────────────────
+                tier_key  = get_affection_tier(affection)
+                gif_url   = await self._fetch_waifu_gif(tier_key)
+
+                if gif_url:
+                    embed = discord.Embed(
+                        description=reply_text,
+                        color=EMBED_COLORS.get(tier_key, 0xFFB6C1),
+                    )
+                    embed.set_author(
+                        name="Yua ✨",
+                        icon_url=self.bot.user.display_avatar.url,
+                    )
+                    embed.set_image(url=gif_url)
+                    await message.reply(embed=embed)
+                else:
+                    # Fallback: plain text if API failed
+                    if len(reply_text) > 1990:
+                        reply_text = reply_text[:1990] + "…"
+                    await message.reply(reply_text)
 
                 # ── Random quest trigger (10%) ─────────────────────────────────
                 if random.random() < QUEST_CHANCE and user_id not in self._active_quests:
