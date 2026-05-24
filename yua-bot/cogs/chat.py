@@ -11,7 +11,7 @@ import os
 import re
 import random
 import time
-from datetime import date
+from datetime import date, datetime
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -92,6 +92,63 @@ GIFT_REPLIES = {
     "premium": "M-Mou, {name}!! A {item}?! Daisuki~! 🌸❤️ I'll treasure this forever! Affection +{boost}~ ❤️❤️❤️",
 }
 
+# ── Late-Night Companion Mode ───────────────────────────────────────────────────
+
+LATE_NIGHT_HOURS = frozenset(range(0, 5))   # midnight → 4:59 AM UTC
+
+# ── Playful Pout ───────────────────────────────────────────────────────────────
+
+TOP_USER_CACHE_TTL  = 300   # seconds before re-querying MongoDB for top user
+POUT_WINDOW_SECONDS = 300   # top user must have been active this recently
+POUT_MIN_AFFECTION  = 66    # top user must be tier 3 to trigger pout
+
+# ── Quest System ───────────────────────────────────────────────────────────────
+
+QUEST_CHANCE            = 0.10
+QUEST_REWARD_AFFECTION  = 5
+QUEST_REWARD_ITEM       = "Common Pocky"
+
+TRIVIA_POOL = [
+    {
+        "fact_filter_key":      "studying",
+        "fact_filter_contains": "python",
+        "question":  "Yua quiz time~! 🐍 You said you're learning Python — what keyword starts a `for` loop?",
+        "answer_keywords": {"for"},
+    },
+    {
+        "fact_filter_key": None,
+        "question":  "Quick trivia~! 🌸 What is the Japanese word for 'cute'?",
+        "answer_keywords": {"kawaii"},
+    },
+    {
+        "fact_filter_key": None,
+        "question":  "Ara ara~ In anime, what does 'nakama' mean?",
+        "answer_keywords": {"friend", "friends", "comrade", "companion"},
+    },
+    {
+        "fact_filter_key": None,
+        "question":  "Trivia time~! 🌸 In programming, what does 'API' stand for?",
+        "answer_keywords": {"application programming interface", "application", "interface"},
+    },
+    {
+        "fact_filter_key": None,
+        "question":  "Yua asks~! ✨ What does 'sugoi' mean in Japanese?",
+        "answer_keywords": {"amazing", "great", "awesome", "incredible", "wow"},
+    },
+    {
+        "fact_filter_key": "favorite_anime",
+        "question":  "You said your fav anime is {value}~! 🌸 Tell me one character you love from it!",
+        "answer_keywords": None,   # opinion — any answer accepted
+    },
+]
+
+FAVOR_POOL = [
+    ("Premium Coffee",  "I'm feeling a bit slow today~ 😴 Can you gift me a **Premium Coffee**? Pretty please? ☕"),
+    ("Premium Matcha",  "Ara ara~ 🍵 I've been craving **Premium Matcha** all day! Could someone gift me one?"),
+    ("Rare Flower",     "Mou~ 🌸 I'd love a **Rare Flower** right now! Anyone feeling generous?"),
+    ("Rare Plushie",    "I want something soft to hug~ 😳 A **Rare Plushie** would make me so happy!"),
+]
+
 
 # ── Affection helpers ──────────────────────────────────────────────────────────
 
@@ -129,7 +186,19 @@ def extract_facts(content: str) -> list:
 
 # ── System prompt ──────────────────────────────────────────────────────────────
 
-def build_system_prompt(user_name: str, affection: int, user_facts: list) -> str:
+def _get_late_night_modifier() -> str:
+    if datetime.utcnow().hour in LATE_NIGHT_HOURS:
+        return (
+            "\n\n━━━ LATE-NIGHT COMPANION MODE ━━━\n"
+            "It is past midnight. Shift into soft, cozy, late-night companion mode. "
+            "Speak more gently and quietly — like a warm friend who is genuinely happy to stay up late. "
+            "You can mention it is getting late and gently suggest they rest eventually, but stay present. "
+            "Less energetic, more intimate and tender. Think whisper-soft, candlelit vibes."
+        )
+    return ""
+
+
+def build_system_prompt(user_name: str, affection: int, user_facts: list, extra_modifiers: str = "") -> str:
     tier = get_affection_tier(affection)
 
     if tier == "cold":
@@ -199,6 +268,7 @@ def build_system_prompt(user_name: str, affection: int, user_facts: list) -> str
         f"- Use emojis naturally: 🌸 ❤️ 😳 ✨\n"
         f"- NEVER include GIF links, image links, or video links.\n"
         f"- Stay fully in character at all times."
+        f"{extra_modifiers}"
     )
 
 
@@ -332,6 +402,11 @@ class Chat(commands.Cog):
         self.user_cooldowns: dict  = {}
         self.cooldown_warned: set  = set()
         self._seen_ids: OrderedDict = OrderedDict()
+
+        # Engagement feature state
+        self._last_active: dict    = {}   # guild_id → {user_id: monotonic_time}
+        self._top_user_cache: dict = {}   # guild_id → {"user_id": str, "name": str, "affection": int, "cached_at": float}
+        self._active_quests: dict  = {}   # user_id  → quest dict
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -603,10 +678,32 @@ class Chat(commands.Cog):
             f"affection {old_aff}→{new_aff} (+{boost})"
         )
 
+        # ── Check active favor quest ──────────────────────────────────────────
+        quest_bonus_text = ""
+        quest = self._active_quests.get(user_id)
+        if quest and quest["type"] == "favor" and quest.get("item") == item_name:
+            del self._active_quests[user_id]
+            bonus     = QUEST_REWARD_AFFECTION
+            bonus_aff = min(100, new_aff + bonus)
+            if self.mongo_col is not None:
+                try:
+                    await self.mongo_col.update_one(
+                        {"user_id": uid},
+                        {"$set": {"affection_points": bonus_aff}},
+                        upsert=True,
+                    )
+                    self.local_affection[user_id] = bonus_aff
+                    new_aff = bonus_aff
+                    print(f"[Quest] Favor complete uid={uid}, bonus +{bonus}, total aff={bonus_aff}")
+                except Exception:
+                    traceback.print_exc()
+            quest_bonus_text = f"\n💝 **Quest Complete!** +{bonus} bonus affection for fulfilling my request! ❤️"
+
         reply = GIFT_REPLIES[tier].format(name=user_name, item=item_name, boost=boost)
         await message.reply(
             f"{reply}\n"
             f"*(Affection: {old_aff} → **{new_aff}**/100)*"
+            f"{quest_bonus_text}"
         )
 
     async def _cmd_leaderboard(self, message: discord.Message):
@@ -661,6 +758,169 @@ class Chat(commands.Cog):
             f"{board}\n\n"
             f"*Chat with me and send gifts to climb the ranks~*"
         )
+
+    # ── Engagement helpers ─────────────────────────────────────────────────────
+
+    async def _get_top_user_cached(self, guild_id: int) -> dict | None:
+        now    = time.monotonic()
+        cached = self._top_user_cache.get(guild_id)
+        if cached and (now - cached["cached_at"]) < TOP_USER_CACHE_TTL:
+            return cached
+        if self.mongo_col is None:
+            return None
+        try:
+            doc = await self.mongo_col.find_one(
+                {"affection_points": {"$exists": True}},
+                {"user_id": 1, "affection_points": 1, "display_name": 1},
+                sort=[("affection_points", -1)],
+            )
+            if doc:
+                entry = {
+                    "user_id":   doc["user_id"],
+                    "name":      doc.get("display_name", f"User {doc['user_id']}"),
+                    "affection": doc.get("affection_points", 0),
+                    "cached_at": now,
+                }
+                self._top_user_cache[guild_id] = entry
+                return entry
+        except Exception:
+            traceback.print_exc()
+        return None
+
+    async def _build_pout_modifier(self, guild_id: int, user_id: int, user_name: str) -> str:
+        top = await self._get_top_user_cached(guild_id)
+        if not top or top.get("affection", 0) < POUT_MIN_AFFECTION:
+            return ""
+        if str(user_id) == top["user_id"]:
+            return ""   # current user IS the top user — no pout
+        try:
+            top_uid_int = int(top["user_id"])
+        except (ValueError, TypeError):
+            return ""
+        last_seen = self._last_active.get(guild_id, {}).get(top_uid_int, 0)
+        if (time.monotonic() - last_seen) > POUT_WINDOW_SECONDS:
+            return ""
+        top_name = top["name"]
+        return (
+            f"\n\n━━━ PLAYFUL POUT MODIFIER ━━━\n"
+            f"Your absolute favorite, {top_name}, was active in this very chat just moments ago. "
+            f"You are replying to {user_name} politely, but you cannot help yourself — "
+            f"slip in one tiny, adorable, playful pout or side-comment directed at {top_name} "
+            f"somewhere in your reply (e.g. 'Mou, {top_name}-kun, don't think I forgot about you~!'). "
+            f"Keep it brief, cute, and lighthearted — do NOT make it the focus of your reply."
+        )
+
+    async def _cmd_quest(
+        self,
+        message: discord.Message,
+        user_id: int,
+        user_name: str,
+        user_facts: list,
+        force: bool = False,
+    ):
+        if user_id in self._active_quests and not force:
+            return
+
+        deduped_facts: dict = {}
+        for f in user_facts:
+            deduped_facts[f["key"]] = f["value"]
+
+        use_trivia = random.random() < 0.70
+
+        if use_trivia:
+            candidates = []
+            for item in TRIVIA_POOL:
+                fk = item.get("fact_filter_key")
+                if fk is None:
+                    candidates.append(item)
+                elif fk in deduped_facts:
+                    fc = item.get("fact_filter_contains")
+                    if fc is None or fc.lower() in deduped_facts[fk].lower():
+                        candidates.append(item)
+            if not candidates:
+                candidates = [t for t in TRIVIA_POOL if t.get("fact_filter_key") is None]
+            if not candidates:
+                return
+
+            trivia        = random.choice(candidates)
+            fk            = trivia.get("fact_filter_key")
+            q_raw         = trivia.get("question", "")
+            question_text = (
+                q_raw.format(value=deduped_facts[fk])
+                if fk and fk in deduped_facts and "{value}" in q_raw
+                else q_raw
+            )
+
+            self._active_quests[user_id] = {
+                "type":            "trivia",
+                "question":        question_text,
+                "answer_keywords": trivia.get("answer_keywords"),
+            }
+            print(f"[Quest] Trivia triggered for uid={user_id}({user_name})")
+            send = message.reply if force else message.channel.send
+            await send(
+                f"✨ **Yua's Quiz~!**\n"
+                f"{question_text}\n\n"
+                f"*(Answer with `yua <your answer>` or just reply naturally!)*"
+            )
+        else:
+            item_name, favor_text = random.choice(FAVOR_POOL)
+            self._active_quests[user_id] = {"type": "favor", "item": item_name}
+            print(f"[Quest] Favor triggered for uid={user_id}({user_name}) wants {item_name!r}")
+            send = message.reply if force else message.channel.send
+            await send(
+                f"💝 **Yua's Request~!**\n"
+                f"{favor_text}\n\n"
+                f"*(Use `yua gift {item_name}` to fulfill this and earn a bonus! ❤️)*"
+            )
+
+    async def _check_quest_answer(
+        self,
+        message: discord.Message,
+        user_id: int,
+        user_name: str,
+        user_prompt: str,
+    ) -> bool:
+        quest = self._active_quests.get(user_id)
+        if not quest or quest["type"] != "trivia":
+            return False
+
+        del self._active_quests[user_id]
+
+        keywords = quest.get("answer_keywords")
+        lower    = user_prompt.lower()
+        correct  = True if keywords is None else any(kw in lower for kw in keywords)
+        uid      = str(user_id)
+
+        if correct:
+            if self.mongo_col is not None:
+                try:
+                    doc     = await self.mongo_col.find_one({"user_id": uid}) or {}
+                    old_aff = doc.get("affection_points", AFFECTION_DEFAULT)
+                    new_aff = min(100, old_aff + QUEST_REWARD_AFFECTION)
+                    await self.mongo_col.update_one(
+                        {"user_id": uid},
+                        {
+                            "$set":  {"affection_points": new_aff},
+                            "$push": {"inventory": QUEST_REWARD_ITEM},
+                        },
+                        upsert=True,
+                    )
+                    self.local_affection[user_id] = new_aff
+                    print(f"[Quest] uid={uid} correct — aff +{QUEST_REWARD_AFFECTION}, reward: {QUEST_REWARD_ITEM!r}")
+                except Exception:
+                    traceback.print_exc()
+            await message.reply(
+                f"Sugoi, {user_name}~! 🌸 That's right! "
+                f"You earned **+{QUEST_REWARD_AFFECTION} affection** and a **{QUEST_REWARD_ITEM}**! ❤️"
+            )
+        else:
+            hint = f"**{' / '.join(keywords)}**" if keywords else "anything~"
+            await message.reply(
+                f"Hmm~ 😳 Not quite, {user_name}! The answer I was looking for was {hint}. "
+                f"Better luck next time! 🌸"
+            )
+        return True
 
     # ── on_message ────────────────────────────────────────────────────────────
 
@@ -718,6 +978,10 @@ class Chat(commands.Cog):
         self.update_cooldown(user_id)
         self.cooldown_warned.discard(user_id)
 
+        # ── Track last activity (playful pout) ────────────────────────────────
+        if message.guild:
+            self._last_active.setdefault(message.guild.id, {})[user_id] = time.monotonic()
+
         print(f"[on_message] PROCESSING guild={guild_id} user={user_id}({user_name})")
 
         async with message.channel.typing():
@@ -741,6 +1005,13 @@ class Chat(commands.Cog):
                 if lp in ("leaderboard", "top"):
                     await self._cmd_leaderboard(message)
                     return
+                if lp == "quest":
+                    profile_q = await self._get_profile(user_id)
+                    await self._cmd_quest(
+                        message, user_id, user_name,
+                        profile_q.get("user_facts", []), force=True,
+                    )
+                    return
 
                 mood_emoji = random.choice(list(MOODS.values()))
 
@@ -749,6 +1020,10 @@ class Chat(commands.Cog):
                 affection  = profile.get("affection_points", AFFECTION_DEFAULT)
                 user_facts = profile.get("user_facts", [])
                 history    = profile.get("messages", [])
+
+                # ── Active trivia quest answer check ──────────────────────────
+                if await self._check_quest_answer(message, user_id, user_name, user_prompt):
+                    return
 
                 # ── Fast greeting path ────────────────────────────────────────
                 if user_prompt.lower() in GREETINGS:
@@ -762,8 +1037,21 @@ class Chat(commands.Cog):
                     await self._save_interaction(user_id, user_prompt, greeting, delta, new_facts)
                     return
 
+                # ── Context modifiers ─────────────────────────────────────────
+                mod_parts: list[str] = []
+                late_mod = _get_late_night_modifier()
+                if late_mod:
+                    mod_parts.append(late_mod)
+                if message.guild:
+                    pout_mod = await self._build_pout_modifier(
+                        message.guild.id, user_id, user_name
+                    )
+                    if pout_mod:
+                        mod_parts.append(pout_mod)
+                extra_modifiers = "".join(mod_parts)
+
                 # ── Build prompt ──────────────────────────────────────────────
-                system_prompt   = build_system_prompt(user_name, affection, user_facts)
+                system_prompt   = build_system_prompt(user_name, affection, user_facts, extra_modifiers)
                 memory_context  = self.build_memory_context(history)
 
                 full_prompt = (
@@ -788,6 +1076,12 @@ class Chat(commands.Cog):
 
                 # ── Send reply ────────────────────────────────────────────────
                 await message.reply(reply_text)
+
+                # ── Random quest trigger (10%) ─────────────────────────────────
+                if random.random() < QUEST_CHANCE and user_id not in self._active_quests:
+                    asyncio.create_task(
+                        self._cmd_quest(message, user_id, user_name, user_facts)
+                    )
 
                 # ── Persist: affection + facts + messages ─────────────────────
                 delta     = calc_affection_delta(user_prompt)
