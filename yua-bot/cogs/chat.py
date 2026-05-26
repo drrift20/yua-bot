@@ -7,6 +7,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from collections import deque, OrderedDict
 import asyncio
 import aiohttp
+import certifi
+import ssl
 import traceback
 import os
 import re
@@ -33,7 +35,7 @@ FACTS_LIMIT       = 20    # max stored facts per user
 
 GEMINI_MODELS = [
     "gemini-2.0-flash",
-    "gemini-1.5-flash",
+    "gemini-2.0-flash-lite",
 ]
 
 SAFETY_SETTINGS = [
@@ -108,6 +110,11 @@ EMBED_COLORS = {
 }
 
 WAIFU_API_TIMEOUT = aiohttp.ClientTimeout(total=8)   # generous enough for cold TCP on Replit
+
+# TLS 1.2-capped context — fixes TLSV1_ALERT_INTERNAL_ERROR from waifu.pics on OpenSSL 3.x
+_WAIFU_SSL = ssl.create_default_context(cafile=certifi.where())
+_WAIFU_SSL.minimum_version = ssl.TLSVersion.TLSv1_2
+_WAIFU_SSL.maximum_version = ssl.TLSVersion.TLSv1_2
 
 # ── Late-Night Companion Mode ───────────────────────────────────────────────────
 
@@ -789,11 +796,11 @@ class Chat(commands.Cog):
         url = WAIFU_PICS_ENDPOINTS.get(tier, WAIFU_PICS_ENDPOINTS["friendly"])
         try:
             async with aiohttp.ClientSession(timeout=WAIFU_API_TIMEOUT) as session:
-                async with session.get(url) as resp:
+                async with session.get(url, ssl=_WAIFU_SSL) as resp:
                     if resp.status == 200:
-                        data = await resp.json()
+                        data = await resp.json(content_type=None)
                         gif_url = data.get("url")
-                        if gif_url:
+                        if gif_url and isinstance(gif_url, str) and gif_url.startswith("http"):
                             print(f"[Waifu.pics] [{tier}] fetched: {gif_url}")
                             return gif_url
                     print(f"[Waifu.pics] [{tier}] non-200 status: {resp.status}")
