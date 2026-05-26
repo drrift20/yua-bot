@@ -107,7 +107,7 @@ EMBED_COLORS = {
     "attached": 0xFF69B4,   # deep rose
 }
 
-WAIFU_API_TIMEOUT = aiohttp.ClientTimeout(total=4)   # fail fast, never block chat
+WAIFU_API_TIMEOUT = aiohttp.ClientTimeout(total=8)   # generous enough for cold TCP on Replit
 
 # ── Late-Night Companion Mode ───────────────────────────────────────────────────
 
@@ -1124,18 +1124,19 @@ class Chat(commands.Cog):
                 gif_url   = await self._fetch_waifu_gif(tier_key)
 
                 if gif_url:
+                    try:
+                        icon_url = self.bot.user.display_avatar.url
+                    except Exception:
+                        icon_url = None
                     embed = discord.Embed(
                         description=reply_text,
                         color=EMBED_COLORS.get(tier_key, 0xFFB6C1),
                     )
-                    embed.set_author(
-                        name="Yua ✨",
-                        icon_url=self.bot.user.display_avatar.url,
-                    )
+                    embed.set_author(name="Yua ✨", icon_url=icon_url)
                     embed.set_image(url=gif_url)
                     await message.reply(embed=embed)
                 else:
-                    # Fallback: plain text if API failed
+                    # Fallback: plain text if waifu.pics unavailable
                     if len(reply_text) > 1990:
                         reply_text = reply_text[:1990] + "…"
                     await message.reply(reply_text)
