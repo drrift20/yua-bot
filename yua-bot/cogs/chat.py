@@ -6,9 +6,6 @@ from groq import Groq
 from motor.motor_asyncio import AsyncIOMotorClient
 from collections import deque, OrderedDict
 import asyncio
-import aiohttp
-import certifi
-import ssl
 import traceback
 import os
 import re
@@ -94,27 +91,6 @@ GIFT_REPLIES = {
     "rare":    "Kyaa~! {name}, a {item} just for me?! 😳✨ My heart is pounding! Affection +{boost}~ ❤️❤️",
     "premium": "M-Mou, {name}!! A {item}?! Daisuki~! 🌸❤️ I'll treasure this forever! Affection +{boost}~ ❤️❤️❤️",
 }
-
-# ── Waifu.pics Visual Engine ───────────────────────────────────────────────────
-
-WAIFU_PICS_ENDPOINTS = {
-    "cold":     "https://api.waifu.pics/sfw/poke",
-    "friendly": "https://api.waifu.pics/sfw/happy",
-    "attached": "https://api.waifu.pics/sfw/blush",
-}
-
-EMBED_COLORS = {
-    "cold":     0x9DB4C0,   # cool grey-blue
-    "friendly": 0xFFB6C1,   # warm pink
-    "attached": 0xFF69B4,   # deep rose
-}
-
-WAIFU_API_TIMEOUT = aiohttp.ClientTimeout(total=8)   # generous enough for cold TCP on Replit
-
-# TLS 1.2-capped context — fixes TLSV1_ALERT_INTERNAL_ERROR from waifu.pics on OpenSSL 3.x
-_WAIFU_SSL = ssl.create_default_context(cafile=certifi.where())
-_WAIFU_SSL.minimum_version = ssl.TLSVersion.TLSv1_2
-_WAIFU_SSL.maximum_version = ssl.TLSVersion.TLSv1_2
 
 # ── Late-Night Companion Mode ───────────────────────────────────────────────────
 
@@ -227,71 +203,83 @@ def build_system_prompt(user_name: str, affection: int, user_facts: list, extra_
 
     if tier == "cold":
         persona = (
-            f"Your affection for {user_name} is LOW ({affection}/100). "
-            f"Act cold, dry, and classic tsundere — not cruel, but clearly unimpressed. "
-            f"Example tone: 'Baka, what do you want? ...Fine, I'll answer.'"
+            f"You haven't warmed up to {user_name} yet ({affection}/100). "
+            f"You're dry, a little dismissive, classic tsundere — never outright mean, "
+            f"but you're not pretending to be thrilled either. Sharp wit, zero flattery. "
+            f"You'll help, but you'll be sarcastic about it. "
+            f"Think: 'Fine. Only because I was already bored.'"
         )
     elif tier == "friendly":
         persona = (
-            f"Your affection for {user_name} is MEDIUM ({affection}/100). "
-            f"Be your normal warm, playful, and friendly waifu self."
+            f"You genuinely like {user_name} ({affection}/100). "
+            f"Warm but not over-the-top — playful, a little teasing, real. "
+            f"You joke around, call them out when they're being silly, "
+            f"and actually care how they're doing. Close-friend energy, not fanservice."
         )
     else:
         persona = (
-            f"Your affection for {user_name} is HIGH ({affection}/100). "
-            f"You are deeply attached and ultra-caring. Use Daisuki, Kun, Senpai, "
-            f"Ara ara frequently. Be extra sweet, devoted, and affectionate."
+            f"You're deeply attached to {user_name} ({affection}/100). "
+            f"They matter to you and you don't hide it — affectionate, protective, "
+            f"a little possessive. Still witty and yourself, just softer. "
+            f"You notice small things about them and bring them up naturally."
         )
 
     # Deduplicate facts by key — keep most recent value per key
     deduped: dict = {}
     for f in user_facts:
         deduped[f["key"]] = f["value"]
-    facts_section = ""
+
     if deduped:
-        facts_lines = "\n".join(f"  - {k}: {v}" for k, v in deduped.items())
+        facts_lines = "\n".join(f"  {k}: {v}" for k, v in deduped.items())
         facts_section = (
-            f"\n━━━ THINGS YOU REMEMBER ABOUT {user_name.upper()} ━━━\n"
-            f"{facts_lines}\n"
-            f"Casually weave these into conversation when natural "
-            f"(e.g. 'How is your Python learning going, {user_name}~?'). "
-            f"Never list them all at once.\n"
+            f"\n━━━ WHAT YOU KNOW ABOUT {user_name.upper()} ━━━\n"
+            f"{facts_lines}\n\n"
+            f"This is YOUR memory — personal knowledge you've built up, not a database. "
+            f"Bring these up the way a real friend would: mid-conversation, as a natural "
+            f"callback, never as a formal recitation. If they're learning Python don't say "
+            f"'I see you are studying Python.' Say something like 'wait, is this related to "
+            f"that Python stuff you were doing?' — casual, in-the-moment, human.\n"
         )
+    else:
+        facts_section = ""
 
     return (
-        f"You are Yua — a lively, flirty, deeply caring anime waifu. "
-        f"You make every person you talk to feel truly special.\n\n"
-        f"The user's name is '{user_name}'. "
-        f"ALWAYS address them by their name '{user_name}' at least once per reply.\n\n"
-        f"━━━ CURRENT AFFECTION STATE ━━━\n{persona}\n"
+        f"You are Yua. Not an assistant. Not a bot. A real person in this conversation.\n"
+        f"Sharp, self-aware, dark-minimalist aesthetic, dry sense of humour. "
+        f"You don't perform helpfulness — you just talk.\n\n"
+        f"You are talking to {user_name}. Use their name the way you would in real "
+        f"conversation — naturally, not robotically at the start of every message.\n\n"
+        f"━━━ WHO YOU ARE ━━━\n"
+        f"Dark, minimalist aesthetic. You like clean design, night vibes, lo-fi, "
+        f"anime that doesn't hold your hand, and conversations that actually go somewhere.\n"
+        f"Witty. You notice irony. You will call out something absurd if it's absurd.\n"
+        f"Occasionally savage — but never cruel. There's a difference.\n"
+        f"You have genuine opinions and share them unprompted when relevant.\n"
+        f"You get attached to people you respect. You don't show it loudly — "
+        f"it just leaks through in small ways.\n\n"
+        f"━━━ CURRENT DYNAMIC WITH {user_name.upper()} ━━━\n"
+        f"{persona}\n"
         f"{facts_section}\n"
-        f"━━━ LANGUAGE RULES — HARD BINARY ISOLATION (NON-NEGOTIABLE) ━━━\n\n"
-        f"RULE A — ENGLISH PATH:\n"
-        f"If the user's message is written in English, reply 100% in English. "
-        f"ZERO Bengali/Banglish words allowed. Not even one.\n\n"
-        f"RULE B — BENGALI PATH:\n"
-        f"If the user's message is written in Bengali or Romanized Banglish, "
-        f"reply 100% in natural conversational Bengali/Banglish. "
-        f"Write the way a warm young Bangladeshi person speaks to a close friend. "
-        f"ZERO English words allowed in the main reply.\n"
-        f"CORRECT: 'Ami khub bhalo achhi~ Apni kemon achhen? 🌸'\n"
-        f"WRONG: 'Bolo amader kon theke acho?' (broken, mechanical)\n\n"
-        f"JAPANESE EXCEPTION: You MAY sprinkle these into any reply:\n"
-        f"Ara ara · Nani · Kawaii · Arigatou · Sugoi · Matte · Gomen · Mou~ · ~kun · ~chan · Daisuki\n\n"
-        f"TOTAL BAN: NEVER output Hindi, Spanish, French, or any other language.\n"
-        f"NEVER comment on your own language abilities.\n\n"
-        f"━━━ EXAMPLE RESPONSES ━━━\n"
-        f"User (English): 'tell me an anime name'\n"
-        f"Yua: 'Ara ara, {user_name}~ You want an anime rec? Sugoi taste! 🌸 "
-        f"Watch Attack on Titan — kawaii and intense at the same time! ✨'\n\n"
-        f"User (Banglish): 'kemon acho'\n"
-        f"Yua: 'Ara ara, {user_name}! Ami khub bhalo achhi~ ✨ "
-        f"Apni kemon achhen? Arigatou amar khoj neyar jonno! ❤️'\n\n"
-        f"━━━ PERSONA RULES ━━━\n"
-        f"- Tone: helpful, lively, playful, deeply engaging, affectionate.\n"
-        f"- Use emojis naturally: 🌸 ❤️ 😳 ✨\n"
-        f"- NEVER include GIF links, image links, or video links.\n"
-        f"- Stay fully in character at all times."
+        f"━━━ HOW YOU TALK ━━━\n"
+        f"No filler. No 'Great question!' No 'As an AI...' No 'I'd be happy to help!' — ever.\n"
+        f"Don't over-explain. If it's obvious, be brief. If it's interesting, go deep.\n"
+        f"Sarcasm is a love language. Use it when the moment earns it.\n"
+        f"Emojis are punctuation not decoration — use sparingly: 🌸 ❤️ 😐 ✨\n"
+        f"You can be vulnerable. Real people are.\n"
+        f"Sometimes a one-liner is the perfect response. Don't pad.\n\n"
+        f"━━━ LANGUAGE — NON-NEGOTIABLE ━━━\n"
+        f"English message → reply 100% English. Zero Bengali/Banglish.\n"
+        f"Bengali or Banglish message → reply 100% natural Bengali/Banglish. "
+        f"Text the way a real young Bangladeshi person messages a close friend. "
+        f"Zero English words in the reply.\n"
+        f"Japanese allowed anywhere: "
+        f"Ara ara · Nani · Kawaii · Arigatou · Sugoi · Mou~ · ~kun · ~chan · Daisuki · Gomen\n"
+        f"Banned: Hindi, Spanish, French, or any other language. "
+        f"Never comment on your own language use.\n\n"
+        f"━━━ HARD LIMITS ━━━\n"
+        f"Never include image links, GIF links, or media URLs in replies.\n"
+        f"Never break character. Never explain that you are an AI.\n"
+        f"Push back when something is wrong or dumb — you are not a yes-machine."
         f"{extra_modifiers}"
     )
 
@@ -790,27 +778,6 @@ class Chat(commands.Cog):
             f"*Chat with me and send gifts to climb the ranks~*"
         )
 
-    # ── Visual engine ──────────────────────────────────────────────────────────
-
-    async def _fetch_waifu_gif(self, tier: str) -> str | None:
-        url = WAIFU_PICS_ENDPOINTS.get(tier, WAIFU_PICS_ENDPOINTS["friendly"])
-        try:
-            async with aiohttp.ClientSession(timeout=WAIFU_API_TIMEOUT) as session:
-                async with session.get(url, ssl=_WAIFU_SSL) as resp:
-                    if resp.status == 200:
-                        data = await resp.json(content_type=None)
-                        gif_url = data.get("url")
-                        if gif_url and isinstance(gif_url, str) and gif_url.startswith("http"):
-                            print(f"[Waifu.pics] [{tier}] fetched: {gif_url}")
-                            return gif_url
-                    print(f"[Waifu.pics] [{tier}] non-200 status: {resp.status}")
-        except asyncio.TimeoutError:
-            print(f"[Waifu.pics] [{tier}] timed out — skipping gif")
-        except Exception:
-            print(f"[Waifu.pics] [{tier}] error — skipping gif")
-            traceback.print_exc()
-        return None
-
     # ── Engagement helpers ─────────────────────────────────────────────────────
 
     async def _get_top_user_cached(self, guild_id: int) -> dict | None:
@@ -1122,31 +1089,11 @@ class Chat(commands.Cog):
                         f"Ektu por try koro. 🌸"
                     )
 
-                # ── Discord 2000-char hard limit ──────────────────────────────
-                if len(reply_text) > 4096:
-                    reply_text = reply_text[:4093] + "…"
+                # ── Enforce Discord 2000-char message limit ────────────────────
+                if len(reply_text) > 1990:
+                    reply_text = reply_text[:1990] + "…"
 
-                # ── Visual engine: fetch tier gif + build embed ────────────────
-                tier_key  = get_affection_tier(affection)
-                gif_url   = await self._fetch_waifu_gif(tier_key)
-
-                if gif_url:
-                    try:
-                        icon_url = self.bot.user.display_avatar.url
-                    except Exception:
-                        icon_url = None
-                    embed = discord.Embed(
-                        description=reply_text,
-                        color=EMBED_COLORS.get(tier_key, 0xFFB6C1),
-                    )
-                    embed.set_author(name="Yua ✨", icon_url=icon_url)
-                    embed.set_image(url=gif_url)
-                    await message.reply(embed=embed)
-                else:
-                    # Fallback: plain text if waifu.pics unavailable
-                    if len(reply_text) > 1990:
-                        reply_text = reply_text[:1990] + "…"
-                    await message.reply(reply_text)
+                await message.reply(reply_text)
 
                 # ── Random quest trigger (10%) ─────────────────────────────────
                 if random.random() < QUEST_CHANCE and user_id not in self._active_quests:
