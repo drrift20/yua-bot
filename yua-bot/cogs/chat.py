@@ -8,7 +8,6 @@ from collections import deque, OrderedDict
 import asyncio
 import traceback
 import os
-import re
 import random
 import time
 from datetime import date, datetime
@@ -94,35 +93,32 @@ QUEST_REWARD_ITEM       = "Common Pocky"
 
 TRIVIA_POOL = [
     {
-        "fact_filter_key":      "studying",
-        "fact_filter_contains": "python",
-        "question":  "Yua quiz time~! 🐍 You said you're learning Python — what keyword starts a `for` loop?",
-        "answer_keywords": {"for"},
-    },
-    {
-        "fact_filter_key": None,
-        "question":  "Quick trivia~! 🌸 What is the Japanese word for 'cute'?",
+        "question":        "Quick trivia~! 🌸 What is the Japanese word for 'cute'?",
         "answer_keywords": {"kawaii"},
     },
     {
-        "fact_filter_key": None,
-        "question":  "Ara ara~ In anime, what does 'nakama' mean?",
+        "question":        "Ara ara~ In anime, what does 'nakama' mean?",
         "answer_keywords": {"friend", "friends", "comrade", "companion"},
     },
     {
-        "fact_filter_key": None,
-        "question":  "Trivia time~! 🌸 In programming, what does 'API' stand for?",
+        "question":        "Trivia time~! 🌸 In programming, what does 'API' stand for?",
         "answer_keywords": {"application programming interface", "application", "interface"},
     },
     {
-        "fact_filter_key": None,
-        "question":  "Yua asks~! ✨ What does 'sugoi' mean in Japanese?",
+        "question":        "Yua asks~! ✨ What does 'sugoi' mean in Japanese?",
         "answer_keywords": {"amazing", "great", "awesome", "incredible", "wow"},
     },
     {
-        "fact_filter_key": "favorite_anime",
-        "question":  "You said your fav anime is {value}~! 🌸 Tell me one character you love from it!",
-        "answer_keywords": None,   # opinion — any answer accepted
+        "question":        "Yua quiz time~! 🐍 What keyword starts a `for` loop in Python?",
+        "answer_keywords": {"for"},
+    },
+    {
+        "question":        "Hmm~ 🌸 What does 'isekai' mean in anime terms?",
+        "answer_keywords": {"another world", "different world", "other world", "parallel world"},
+    },
+    {
+        "question":        "✨ What does HTTP stand for?",
+        "answer_keywords": {"hypertext transfer protocol", "hypertext", "transfer protocol"},
     },
 ]
 
@@ -417,6 +413,7 @@ class Chat(commands.Cog):
         user_msg: str,
         yua_msg: str,
         affection_delta: int,
+        user_name: str = "",
     ):
         uid   = str(user_id)
         today = str(date.today())
@@ -457,12 +454,15 @@ class Chat(commands.Cog):
         # ── Persist to MongoDB ──
         if self.mongo_col is not None:
             try:
+                set_fields: dict = {
+                    "affection_points": new_aff,
+                    "affection_today":  new_today,
+                    "affection_date":   today,
+                }
+                if user_name:
+                    set_fields["display_name"] = user_name
                 update = {
-                    "$set": {
-                        "affection_points": new_aff,
-                        "affection_today":  new_today,
-                        "affection_date":   today,
-                    },
+                    "$set": set_fields,
                     "$push": {
                         "messages": {
                             "$each":  entries,
@@ -490,7 +490,7 @@ class Chat(commands.Cog):
     def build_memory_context(self, messages: list) -> str:
         if not messages:
             return ""
-        lines = "\n".join(f"  {m['role']}: {m['content']}" for m in messages)
+        lines = "\n".join(f"  {m.get('role', '?')}: {m.get('content', '')}" for m in messages)
         return f"\nConversation history (oldest to newest):\n{lines}\n"
 
     # ── AI generation (still sync SDKs — must use thread pool) ────────────────
@@ -961,11 +961,7 @@ class Chat(commands.Cog):
                 affection = profile.get("affection_points", AFFECTION_DEFAULT)
                 history   = profile.get("messages", [])
 
-                # ── Active trivia quest answer check ──────────────────────────
-                if await self._check_quest_answer(message, user_id, user_name, user_prompt):
-                    return
-
-                # ── Fast greeting path ────────────────────────────────────────
+                # ── Fast greeting path (before quest check — greetings are not answers) ──
                 if user_prompt.lower() in GREETINGS:
                     greeting = (
                         f"Ara ara, {user_name}~! {mood_emoji} "
@@ -973,7 +969,11 @@ class Chat(commands.Cog):
                     )
                     await message.reply(greeting)
                     delta = calc_affection_delta(user_prompt)
-                    await self._save_interaction(user_id, user_prompt, greeting, delta)
+                    await self._save_interaction(user_id, user_prompt, greeting, delta, user_name)
+                    return
+
+                # ── Active trivia quest answer check ──────────────────────────
+                if await self._check_quest_answer(message, user_id, user_name, user_prompt):
                     return
 
                 # ── Context modifiers ─────────────────────────────────────────
@@ -1017,14 +1017,18 @@ class Chat(commands.Cog):
 
                 # ── Random quest trigger (10%) ─────────────────────────────────
                 if random.random() < QUEST_CHANCE and user_id not in self._active_quests:
-                    asyncio.create_task(
+                    task = asyncio.create_task(
                         self._cmd_quest(message, user_id, user_name)
+                    )
+                    task.add_done_callback(
+                        lambda t: print(f"[Quest] task error: {t.exception()!r}")
+                        if not t.cancelled() and t.exception() else None
                     )
 
                 # ── Persist: affection + messages ──────────────────────────────
                 delta   = calc_affection_delta(user_prompt)
                 new_aff = await self._save_interaction(
-                    user_id, user_prompt, reply_text, delta
+                    user_id, user_prompt, reply_text, delta, user_name
                 )
 
                 print(f"[Affection] uid={user_id} current={new_aff}/100 tier={get_affection_tier(new_aff)}")
