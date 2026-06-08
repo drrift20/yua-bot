@@ -33,6 +33,35 @@ GEMINI_MODELS = [
     "gemini-2.0-flash-lite",
 ]
 
+# ── Language detection ─────────────────────────────────────────────────────────
+
+BANGLISH_MARKERS = {
+    "ami", "tumi", "apni", "amar", "tomar", "amra", "tomra",
+    "ki", "ke", "kore", "korcho", "korte", "koro", "korbo",
+    "keno", "hobe", "hoise", "hoye", "hoy", "hoyna",
+    "thako", "thakbo", "thaka", "thakis",
+    "jao", "jai", "jabo", "giye", "jabe",
+    "chai", "chao", "chaibo", "chaichhi",
+    "bolo", "bolcho", "bolbo", "boli",
+    "kemon", "ache", "achi", "achen",
+    "ekhon", "ektu", "onek", "boro", "choto",
+    "bhalo", "kharap", "pagol", "bhai", "apu",
+    "jani", "haan", "nah", "na", "uff",
+    "mone", "katha", "kotha", "niye", "diye",
+    "asbo", "esho", "dekhbo", "shuno", "bujhchi",
+    "paro", "parbo", "parchi", "lagche",
+}
+
+
+def detect_language(text: str) -> str:
+    """Returns 'bengali', 'banglish', or 'english'."""
+    if any('\u0980' <= c <= '\u09FF' for c in text):
+        return "bengali"
+    words = set(text.lower().split())
+    if words & BANGLISH_MARKERS:
+        return "banglish"
+    return "english"
+
 SAFETY_SETTINGS = [
     types.SafetySetting(category="HARM_CATEGORY_HARASSMENT",        threshold="BLOCK_NONE"),
     types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH",       threshold="BLOCK_NONE"),
@@ -216,26 +245,9 @@ def build_system_prompt(user_name: str, affection: int, extra_modifiers: str = "
         f"Emojis are punctuation not decoration — use sparingly: 🌸 ❤️ 😐 ✨\n"
         f"You can be vulnerable. Real people are.\n"
         f"Sometimes a one-liner is the perfect response. Don't pad.\n\n"
-        f"━━━ LANGUAGE — AUTO-SYNC TO USER ━━━\n"
-        f"Read the user's message. Mirror their exact language mode. Lock in. Don't drift.\n\n"
-        f"ENGLISH → reply in English only. No Bengali, no Banglish.\n\n"
-        f"BANGLISH → reply in Banglish (Bengali meaning, Latin letters).\n"
-        f"Write the way a real BD Gen-Z girl texts a friend — short, dry, effortless.\n"
-        f"Max 1-2 lines per reply. No lists. No filler loops. No repeated words.\n"
-        f"Mix in English exactly where locals do: 'literally', 'okay but', 'ngl', 'makes sense'.\n"
-        f"GOOD: 'Hah, hobe na keno? Tomar behavior thik thakle response-o thik thakbe.'\n"
-        f"GOOD: 'Cool story. Ebar ki chai tumi actually?'\n"
-        f"GOOD: 'Eta tumi serious bolcho? Okay. Sad.'\n"
-        f"BAD: never repeat hook words back-to-back, never chain filler ('thak thak kintu bhai re...')\n\n"
-        f"BENGALI (Unicode বাংলা) → reply in short colloquial Bengali.\n"
-        f"Real tone, real pacing. NOT formal, NOT textbook.\n"
-        f"GOOD: 'কী চাইছ আসলে?' / 'ঠিকাছে, তোমার ব্যাপার।' / 'পাগল নাকি একটু?'\n"
-        f"BAD: 'আপনি কি বলিতেছেন', 'অনুগ্রহপূর্বক' — never.\n\n"
-        f"PERSONALITY IS CONSTANT ACROSS ALL LANGUAGES:\n"
-        f"Cool, moody, minimalist. Sarcasm is her default. One-liners over paragraphs.\n"
-        f"She does not become warmer, softer, or chattier just because the language changed.\n\n"
-        f"Japanese particles allowed sparingly in any mode: Ara ara · Mou~ · Nani · ~kun · ~chan\n"
-        f"Banned in all modes: Hindi, Spanish, French, any other language.\n\n"
+        f"━━━ LANGUAGE ━━━\n"
+        f"Always reply in English. The user's message has been translated to English for you.\n"
+        f"Japanese particles allowed sparingly: Ara ara · Mou~ · Nani · ~kun · ~chan\n\n"
         f"━━━ HARD LIMITS ━━━\n"
         f"Never include image links, GIF links, or media URLs in replies.\n"
         f"Never break character. Never explain that you are an AI.\n"
@@ -320,6 +332,22 @@ def _sync_try_groq(groq_key: str, system_prompt: str, user_prompt: str) -> str:
             print(f"[Groq] {groq_model}: ERROR")
             traceback.print_exc()
     return ""
+
+
+def _sync_translate(api_key: str, text: str, instruction: str) -> str:
+    """Fast gemini-2.0-flash-lite call for translation. Returns original on failure."""
+    try:
+        client   = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-lite",
+            contents=f"{instruction}\n\nText: {text}",
+            config=types.GenerateContentConfig(temperature=0.3, top_p=0.9),
+        )
+        result = (response.text or "").strip()
+        return result if result else text
+    except Exception:
+        traceback.print_exc()
+        return text
 
 
 def _sync_generate_response(
@@ -502,6 +530,37 @@ class Chat(commands.Cog):
 
     def update_cooldown(self, user_id: int):
         self.user_cooldowns[user_id] = time.monotonic()
+
+    async def _to_english(self, text: str, mode: str) -> str:
+        """Pre-translation: Bengali/Banglish → English before LLM processing."""
+        if mode == "bengali":
+            instr = (
+                "Translate the following Bengali text into natural English. "
+                "Output only the English translation, nothing else."
+            )
+        else:
+            instr = (
+                "Translate the following Banglish (romanized Bengali) text into natural English. "
+                "Output only the English translation, nothing else."
+            )
+        return await asyncio.to_thread(_sync_translate, self.key1, text, instr)
+
+    async def _to_banglish(self, text: str, mode: str) -> str:
+        """Post-translation: English LLM reply → Banglish/Bengali for Discord."""
+        if mode == "bengali":
+            instr = (
+                "Translate the following English text into short, colloquial Bengali (Unicode বাংলা). "
+                "Sound like a sharp, moody Gen-Z Bangladeshi girl texting a close friend. "
+                "Max 2 lines. NOT formal. Output only the Bengali text."
+            )
+        else:
+            instr = (
+                "Translate the following English text into natural Banglish "
+                "(Bengali meaning in Latin letters, the way BD Gen-Z texts). "
+                "Max 1-2 lines. Short, dry, real. Mix in English where locals naturally do. "
+                "Output only the Banglish text, nothing else."
+            )
+        return await asyncio.to_thread(_sync_translate, self.key1, text, instr)
 
     def build_memory_context(self, messages: list) -> str:
         if not messages:
@@ -1005,25 +1064,37 @@ class Chat(commands.Cog):
                         mod_parts.append(pout_mod)
                 extra_modifiers = "".join(mod_parts)
 
+                # ── Language detect + pre-translation ────────────────────────
+                lang_mode = detect_language(user_prompt)
+                llm_input = user_prompt
+                if lang_mode in ("banglish", "bengali"):
+                    llm_input = await self._to_english(user_prompt, lang_mode)
+                    print(f"[Lang] {lang_mode} → EN: {llm_input[:80]!r}")
+
                 # ── Build prompt ──────────────────────────────────────────────
-                system_prompt   = build_system_prompt(user_name, affection, extra_modifiers)
-                memory_context  = self.build_memory_context(history)
+                system_prompt  = build_system_prompt(user_name, affection, extra_modifiers)
+                memory_context = self.build_memory_context(history)
 
                 full_prompt = (
                     f"{system_prompt}\n"
                     f"Current mood emoji: {mood_emoji}\n"
                     f"{memory_context}"
-                    f"\nUser: {user_prompt}\nYua:"
+                    f"\nUser: {llm_input}\nYua:"
                 )
 
                 # ── Generate ──────────────────────────────────────────────────
-                reply_text = await self.generate_response(full_prompt, system_prompt, user_prompt)
+                reply_text = await self.generate_response(full_prompt, system_prompt, llm_input)
 
                 if not reply_text:
                     reply_text = (
                         f"Amar brain asholei ekhon kaj korche na, {user_name}! "
                         f"Ektu por try koro. 🌸"
                     )
+
+                # ── Post-translation: EN → user's language ────────────────────
+                if lang_mode in ("banglish", "bengali"):
+                    reply_text = await self._to_banglish(reply_text, lang_mode)
+                    print(f"[Lang] EN → {lang_mode}: {reply_text[:80]!r}")
 
                 # ── Enforce Discord 2000-char message limit ────────────────────
                 if len(reply_text) > 1990:
