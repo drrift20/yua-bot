@@ -28,7 +28,6 @@ COOLDOWN_SECONDS  = 5
 MEMORY_LIMIT      = 15
 AFFECTION_DEFAULT = 30
 AFFECTION_DAILY_CAP = 5   # max positive points per day (anti-spam)
-FACTS_LIMIT       = 20    # max stored facts per user
 
 GEMINI_MODELS = [
     "gemini-2.0-flash",
@@ -55,21 +54,6 @@ NEGATIVE_KEYWORDS = {
     "idiot", "stupid", "dumb", "hate", "shut up", "ugly",
     "useless", "trash", "annoying", "worst", "terrible",
 }
-
-# Personal fact extraction patterns
-FACT_PATTERNS = [
-    (re.compile(r"my name(?:'?s| is) ([A-Za-z ]+?)(?:\.|,|!|\?|$)", re.I), "name"),
-    (re.compile(r"my birthday (?:is|is on) (.+?)(?:\.|,|!|\?|$)", re.I), "birthday"),
-    (re.compile(r"i(?:'m| am) (?:studying|learning) (.+?)(?:\.|,|!|\?|$)", re.I), "studying"),
-    (re.compile(r"i(?:'m| am) a (.+?) student", re.I), "student_field"),
-    (re.compile(r"my (?:fav(?:ou?rite)?) anime (?:is|are) (.+?)(?:\.|,|!|\?|$)", re.I), "favorite_anime"),
-    (re.compile(r"my (?:fav(?:ou?rite)?) (?:game|games) (?:is|are) (.+?)(?:\.|,|!|\?|$)", re.I), "favorite_game"),
-    (re.compile(r"i (?:live in|am from|from) (.+?)(?:\.|,|!|\?|$)", re.I), "location"),
-    (re.compile(r"i work (?:at|as|in) (.+?)(?:\.|,|!|\?|$)", re.I), "work"),
-    (re.compile(r"my age is (\d+)", re.I), "age"),
-    (re.compile(r"i(?:'m| am) (\d+) years? old", re.I), "age"),
-]
-
 
 # ── Item catalogue ─────────────────────────────────────────────────────────────
 
@@ -173,17 +157,6 @@ def calc_affection_delta(content: str) -> int:
     return 0
 
 
-def extract_facts(content: str) -> list:
-    found = []
-    for pattern, key in FACT_PATTERNS:
-        m = pattern.search(content)
-        if m:
-            value = m.group(1).strip().rstrip(".,!?")
-            if value:
-                found.append({"key": key, "value": value})
-    return found
-
-
 # ── System prompt ──────────────────────────────────────────────────────────────
 
 def _get_late_night_modifier() -> str:
@@ -198,7 +171,7 @@ def _get_late_night_modifier() -> str:
     return ""
 
 
-def build_system_prompt(user_name: str, affection: int, user_facts: list, extra_modifiers: str = "") -> str:
+def build_system_prompt(user_name: str, affection: int, extra_modifiers: str = "") -> str:
     tier = get_affection_tier(affection)
 
     if tier == "cold":
@@ -224,25 +197,6 @@ def build_system_prompt(user_name: str, affection: int, user_facts: list, extra_
             f"You notice small things about them and bring them up naturally."
         )
 
-    # Deduplicate facts by key — keep most recent value per key
-    deduped: dict = {}
-    for f in user_facts:
-        deduped[f["key"]] = f["value"]
-
-    if deduped:
-        facts_lines = "\n".join(f"  {k}: {v}" for k, v in deduped.items())
-        facts_section = (
-            f"\n━━━ WHAT YOU KNOW ABOUT {user_name.upper()} ━━━\n"
-            f"{facts_lines}\n\n"
-            f"This is YOUR memory — personal knowledge you've built up, not a database. "
-            f"Bring these up the way a real friend would: mid-conversation, as a natural "
-            f"callback, never as a formal recitation. If they're learning Python don't say "
-            f"'I see you are studying Python.' Say something like 'wait, is this related to "
-            f"that Python stuff you were doing?' — casual, in-the-moment, human.\n"
-        )
-    else:
-        facts_section = ""
-
     return (
         f"You are Yua. Not an assistant. Not a bot. A real person in this conversation.\n"
         f"Sharp, self-aware, dark-minimalist aesthetic, dry sense of humour. "
@@ -259,7 +213,6 @@ def build_system_prompt(user_name: str, affection: int, user_facts: list, extra_
         f"it just leaks through in small ways.\n\n"
         f"━━━ CURRENT DYNAMIC WITH {user_name.upper()} ━━━\n"
         f"{persona}\n"
-        f"{facts_section}\n"
         f"━━━ HOW YOU TALK ━━━\n"
         f"No filler. No 'Great question!' No 'As an AI...' No 'I'd be happy to help!' — ever.\n"
         f"Don't over-explain. If it's obvious, be brief. If it's interesting, go deep.\n"
@@ -456,7 +409,6 @@ class Chat(commands.Cog):
             "affection_points": self.local_affection.get(user_id, AFFECTION_DEFAULT),
             "affection_today": 0,
             "affection_date": str(date.today()),
-            "user_facts": [],
         }
 
     async def _save_interaction(
@@ -465,7 +417,6 @@ class Chat(commands.Cog):
         user_msg: str,
         yua_msg: str,
         affection_delta: int,
-        new_facts: list,
     ):
         uid   = str(user_id)
         today = str(date.today())
@@ -519,11 +470,6 @@ class Chat(commands.Cog):
                         },
                     },
                 }
-                if new_facts:
-                    update["$push"]["user_facts"] = {
-                        "$each":  new_facts,
-                        "$slice": -FACTS_LIMIT,
-                    }
                 await self.mongo_col.update_one(
                     {"user_id": uid}, update, upsert=True
                 )
@@ -834,41 +780,21 @@ class Chat(commands.Cog):
         message: discord.Message,
         user_id: int,
         user_name: str,
-        user_facts: list,
         force: bool = False,
     ):
         if user_id in self._active_quests and not force:
             return
 
-        deduped_facts: dict = {}
-        for f in user_facts:
-            deduped_facts[f["key"]] = f["value"]
-
         use_trivia = random.random() < 0.70
 
         if use_trivia:
-            candidates = []
-            for item in TRIVIA_POOL:
-                fk = item.get("fact_filter_key")
-                if fk is None:
-                    candidates.append(item)
-                elif fk in deduped_facts:
-                    fc = item.get("fact_filter_contains")
-                    if fc is None or fc.lower() in deduped_facts[fk].lower():
-                        candidates.append(item)
-            if not candidates:
-                candidates = [t for t in TRIVIA_POOL if t.get("fact_filter_key") is None]
+            candidates = [t for t in TRIVIA_POOL if t.get("fact_filter_key") is None]
             if not candidates:
                 return
 
             trivia        = random.choice(candidates)
-            fk            = trivia.get("fact_filter_key")
             q_raw         = trivia.get("question", "")
-            question_text = (
-                q_raw.format(value=deduped_facts[fk])
-                if fk and fk in deduped_facts and "{value}" in q_raw
-                else q_raw
-            )
+            question_text = q_raw
 
             self._active_quests[user_id] = {
                 "type":            "trivia",
@@ -1025,20 +951,15 @@ class Chat(commands.Cog):
                     await self._cmd_leaderboard(message)
                     return
                 if lp == "quest":
-                    profile_q = await self._get_profile(user_id)
-                    await self._cmd_quest(
-                        message, user_id, user_name,
-                        profile_q.get("user_facts", []), force=True,
-                    )
+                    await self._cmd_quest(message, user_id, user_name, force=True)
                     return
 
                 mood_emoji = random.choice(list(MOODS.values()))
 
-                # ── Load profile (affection + facts + history) ────────────────
-                profile    = await self._get_profile(user_id)
-                affection  = profile.get("affection_points", AFFECTION_DEFAULT)
-                user_facts = profile.get("user_facts", [])
-                history    = profile.get("messages", [])
+                # ── Load profile (affection + history) ────────────────────────
+                profile   = await self._get_profile(user_id)
+                affection = profile.get("affection_points", AFFECTION_DEFAULT)
+                history   = profile.get("messages", [])
 
                 # ── Active trivia quest answer check ──────────────────────────
                 if await self._check_quest_answer(message, user_id, user_name, user_prompt):
@@ -1051,9 +972,8 @@ class Chat(commands.Cog):
                         f"Ami tomar jonno wait korchilam! ❤️"
                     )
                     await message.reply(greeting)
-                    delta     = calc_affection_delta(user_prompt)
-                    new_facts = extract_facts(user_prompt)
-                    await self._save_interaction(user_id, user_prompt, greeting, delta, new_facts)
+                    delta = calc_affection_delta(user_prompt)
+                    await self._save_interaction(user_id, user_prompt, greeting, delta)
                     return
 
                 # ── Context modifiers ─────────────────────────────────────────
@@ -1070,7 +990,7 @@ class Chat(commands.Cog):
                 extra_modifiers = "".join(mod_parts)
 
                 # ── Build prompt ──────────────────────────────────────────────
-                system_prompt   = build_system_prompt(user_name, affection, user_facts, extra_modifiers)
+                system_prompt   = build_system_prompt(user_name, affection, extra_modifiers)
                 memory_context  = self.build_memory_context(history)
 
                 full_prompt = (
@@ -1098,18 +1018,15 @@ class Chat(commands.Cog):
                 # ── Random quest trigger (10%) ─────────────────────────────────
                 if random.random() < QUEST_CHANCE and user_id not in self._active_quests:
                     asyncio.create_task(
-                        self._cmd_quest(message, user_id, user_name, user_facts)
+                        self._cmd_quest(message, user_id, user_name)
                     )
 
-                # ── Persist: affection + facts + messages ─────────────────────
-                delta     = calc_affection_delta(user_prompt)
-                new_facts = extract_facts(user_prompt)
-                new_aff   = await self._save_interaction(
-                    user_id, user_prompt, reply_text, delta, new_facts
+                # ── Persist: affection + messages ──────────────────────────────
+                delta   = calc_affection_delta(user_prompt)
+                new_aff = await self._save_interaction(
+                    user_id, user_prompt, reply_text, delta
                 )
 
-                if new_facts:
-                    print(f"[Facts] Saved for uid={user_id}: {new_facts}")
                 print(f"[Affection] uid={user_id} current={new_aff}/100 tier={get_affection_tier(new_aff)}")
 
             except Exception:
