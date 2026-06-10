@@ -1016,6 +1016,19 @@ class Chat(commands.Cog):
 
                 # ── Item command dispatch ──────────────────────────────────
                 lp = user_prompt.lower().strip()
+                if lp in ("help", "h", "?"):
+                    await message.reply(
+                        f"Look, {user_name}. Keep it simple. "
+                        f"Don't make me explain this twice:\n\n"
+                        f"• **Talk naturally** — English or Banglish, I'll handle it.\n"
+                        f"• **`yua quest`** — I'll test you. Try not to fail.\n"
+                        f"• **`yua daily`** — Claim your daily item reward.\n"
+                        f"• **`yua gift <item>`** — Gift me something from your stash.\n"
+                        f"• **`yua points`** — See your affection score and tier.\n"
+                        f"• **`yua leaderboard`** — Check where you stand.\n\n"
+                        f"Don't ping me unnecessarily. Clear?"
+                    )
+                    return
                 if lp == "daily":
                     await self._cmd_daily(message)
                     return
@@ -1027,6 +1040,19 @@ class Chat(commands.Cog):
                     return
                 if lp == "quest":
                     await self._cmd_quest(message, user_id, user_name, force=True)
+                    return
+                if lp == "points":
+                    profile_p = await self._get_profile(user_id)
+                    aff       = profile_p.get("affection_points", AFFECTION_DEFAULT)
+                    tier      = get_affection_tier(aff)
+                    tier_labels = {
+                        "cold":     "❄️ Cold",
+                        "friendly": "🌸 Friendly",
+                        "attached": "❤️ Attached",
+                    }
+                    await message.reply(
+                        f"**{user_name}** — ❤️ {aff}/100 · {tier_labels[tier]}"
+                    )
                     return
 
                 mood_emoji = random.choice(list(MOODS.values()))
