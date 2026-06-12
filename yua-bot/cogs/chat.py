@@ -23,6 +23,46 @@ MOODS = {
 
 GREETINGS = {"hi", "hello", "hey", "hiya", "heya", "হ্যালো", "হাই"}
 
+# ── Behavioral response modules ────────────────────────────────────────────────
+
+SAD_KEYWORDS = {
+    "sad", "cry", "crying", "depressed", "upset", "lonely", "broken",
+    "heartbreak", "hurt", "pain", "lost", "fail", "failed",
+    "tired", "stressed", "hopeless", "miserable", "empty",
+}
+
+HAPPY_KEYWORDS = {
+    "happy", "excited", "lmao", "haha", "hehe", "yay",
+    "amazing", "thrilled", "omg", "yesss", "finally", "winning",
+}
+
+OTHER_BOT_KEYWORDS = {
+    "chatgpt", "chat gpt", "gpt-4", "gpt4", "claude", "copilot", "bard",
+    "other bot", "another bot", "different bot", "better bot", "other ai",
+}
+
+MOOD_SAD_RESPONSES = [
+    "Stop whining. Spit it out.",
+    "Rona dhona bondho koro. Ki hoise direct bolo.",
+]
+
+MOOD_HAPPY_RESPONSES = [
+    "Someone's smiling at a screen. Pathetic.",
+    "Eto khushi keno? Subidha ঠেকতেছে na.",
+]
+
+TIMELINE_100_RESPONSES = [
+    "100 texts with me. Still not bored? Fascinating.",
+    "100 ta text complete korla amar sathe. Ekhono bore hoye jao nai? Ashchoryo.",
+]
+
+JEALOUSY_BOT_RESPONSES = [
+    "Go talk to your other bots. Don't crowd my logs.",
+    "Onyo bot-er sathe text chaltese? Bhaloi. Oikhanei thako, ekhane back ashar dorkar nai.",
+]
+
+MOOD_TRIGGER_CHANCE = 0.35   # mood contagion fires at 35% when keywords match
+
 COOLDOWN_SECONDS  = 5
 MEMORY_LIMIT      = 15
 AFFECTION_DEFAULT = 30
@@ -412,6 +452,8 @@ class Chat(commands.Cog):
         self._last_active: dict    = {}   # guild_id → {user_id: monotonic_time}
         self._top_user_cache: dict = {}   # guild_id → {"user_id": str, "name": str, "affection": int, "cached_at": float}
         self._active_quests: dict  = {}   # user_id  → quest dict
+        self._milestone_100_sent: set = set()   # user_ids already notified at 100 msgs
+        self.local_msg_count: dict    = {}       # user_id → message count this session
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -1077,6 +1119,32 @@ class Chat(commands.Cog):
                 if await self._check_quest_answer(message, user_id, user_name, user_prompt):
                     return
 
+                # ── Behavioral intercepts ─────────────────────────────────────
+                lp_check = user_prompt.lower()
+
+                # Jealousy — other AI/bot mentioned → always fires
+                if any(kw in lp_check for kw in OTHER_BOT_KEYWORDS):
+                    resp = random.choice(JEALOUSY_BOT_RESPONSES)
+                    await message.reply(resp)
+                    await self._save_interaction(user_id, user_prompt, resp, -1, user_name)
+                    return
+
+                # Mood contagion sad — fires at 35% when sad keywords detected
+                if (random.random() < MOOD_TRIGGER_CHANCE
+                        and any(kw in lp_check for kw in SAD_KEYWORDS)):
+                    resp = random.choice(MOOD_SAD_RESPONSES)
+                    await message.reply(resp)
+                    await self._save_interaction(user_id, user_prompt, resp, 0, user_name)
+                    return
+
+                # Mood contagion happy — fires at 35% when happy keywords detected
+                if (random.random() < MOOD_TRIGGER_CHANCE
+                        and any(kw in lp_check for kw in HAPPY_KEYWORDS)):
+                    resp = random.choice(MOOD_HAPPY_RESPONSES)
+                    await message.reply(resp)
+                    await self._save_interaction(user_id, user_prompt, resp, 0, user_name)
+                    return
+
                 # ── Context modifiers ─────────────────────────────────────────
                 mod_parts: list[str] = []
                 late_mod = _get_late_night_modifier()
@@ -1145,6 +1213,14 @@ class Chat(commands.Cog):
                 )
 
                 print(f"[Affection] uid={user_id} current={new_aff}/100 tier={get_affection_tier(new_aff)}")
+
+                # ── 100-message milestone ──────────────────────────────────────
+                self.local_msg_count[user_id] = self.local_msg_count.get(user_id, 0) + 1
+                if (self.local_msg_count[user_id] == 100
+                        and user_id not in self._milestone_100_sent):
+                    self._milestone_100_sent.add(user_id)
+                    milestone = random.choice(TIMELINE_100_RESPONSES)
+                    await message.channel.send(milestone)
 
             except Exception:
                 print(
