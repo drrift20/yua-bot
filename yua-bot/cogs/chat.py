@@ -6,6 +6,7 @@ from groq import Groq
 from motor.motor_asyncio import AsyncIOMotorClient
 from collections import deque, OrderedDict
 import asyncio
+import aiohttp
 import traceback
 import os
 import random
@@ -416,9 +417,10 @@ class Chat(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-        self.key1     = os.getenv("GEMINI_API_KEY")
-        self.key2     = os.getenv("GEMINI_API_KEY_2")
-        self.groq_key = os.getenv("GROQ_API_KEY")
+        self.key1      = os.getenv("GEMINI_API_KEY")
+        self.key2      = os.getenv("GEMINI_API_KEY_2")
+        self.groq_key  = os.getenv("GROQ_API_KEY")
+        self.topgg_key = os.getenv("TOPGG_TOKEN")
 
         if not self.key1:
             raise ValueError("GEMINI_API_KEY is not set in Secrets.")
@@ -621,6 +623,33 @@ class Chat(commands.Cog):
 
     # ── Item command handlers ──────────────────────────────────────────────────
 
+    async def _check_topgg_vote(self, user_id: int) -> bool | None:
+        """
+        Returns True if the user voted on Top.gg in the last 12 hours,
+        False if they haven't, or None if the check couldn't be performed
+        (missing token, network error, etc.) — caller should treat None as
+        a pass-through so the daily reward still works.
+        """
+        if not self.topgg_key:
+            return None
+        bot_id = self.bot.user.id
+        url    = f"https://top.gg/api/bots/{bot_id}/check?userId={user_id}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    headers={"Authorization": self.topgg_key},
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as resp:
+                    if resp.status != 200:
+                        print(f"[Top.gg] Unexpected status {resp.status} for uid={user_id}")
+                        return None
+                    data = await resp.json()
+                    return bool(data.get("voted", 0))
+        except Exception:
+            traceback.print_exc()
+            return None
+
     async def _cmd_daily(self, message: discord.Message):
         user_id   = message.author.id
         user_name = message.author.display_name
@@ -653,16 +682,38 @@ class Chat(commands.Cog):
             )
             return
 
+        # ── Top.gg vote gate ──────────────────────────────────────────────────
+        voted = await self._check_topgg_vote(user_id)
+        if voted is False:
+            await message.reply(
+                f"Ara ara, {user_name}~ 🌸 I'd love to give you your daily reward, "
+                f"but you haven't voted for me on Top.gg yet today! 🥺\n\n"
+                f"**Please vote first here →** https://top.gg/bot/{self.bot.user.id}/vote\n\n"
+                f"It only takes a second and it means the world to me~ "
+                f"Come back right after and I'll have something special waiting! ❤️✨"
+            )
+            return
+
+        # ── Grant reward ──────────────────────────────────────────────────────
         item = random.choices(_ALL_ITEMS_FLAT, weights=_ITEM_WEIGHTS, k=1)[0]
         tier = _ITEM_TIER_MAP[item]
 
         tier_labels = {"common": "✨ Common", "rare": "💎 Rare", "premium": "👑 Premium"}
 
+        DAILY_AFFECTION_BONUS = 3
+
+        old_aff = doc.get("affection_points", 30)
+        new_aff = min(100, old_aff + DAILY_AFFECTION_BONUS)
+
         try:
             await self.mongo_col.update_one(
                 {"user_id": uid},
                 {
-                    "$set":  {"last_daily": now, "display_name": user_name},
+                    "$set":  {
+                        "last_daily":       now,
+                        "display_name":     user_name,
+                        "affection_points": new_aff,
+                    },
                     "$push": {"inventory": item},
                 },
                 upsert=True,
@@ -672,11 +723,24 @@ class Chat(commands.Cog):
             await message.reply(f"Something went wrong saving your item, {user_name}~ 😳")
             return
 
-        print(f"[Daily] uid={uid}({user_name}) received [{tier}] {item!r}")
+        self.local_affection[user_id] = new_aff
+
+        print(f"[Daily] uid={uid}({user_name}) received [{tier}] {item!r} | affection {old_aff}→{new_aff}")
+
+        kiss_line = random.choice([
+            "Mwah~ 💋 Consider that a thank-you kiss, just for you.",
+            "😘💋 *leans over and gives you a little kiss on the cheek* — don't read too much into it~",
+            "💋 Chu~! That's for being so sweet and supporting me! ❤️",
+            "*blushes and quickly kisses your cheek* 💋 N-Not because I wanted to! ...Okay maybe a little. 🌸",
+            "Ehehe~ 💋 *smooch* You voted for me so you deserve that~ Don't get too used to it! 😳❤️",
+        ])
+
         await message.reply(
             f"🎁 **Daily Reward!**\n"
-            f"Ara ara, {user_name}~ 🌸 Here's your gift for today!\n\n"
+            f"Ara ara, {user_name}~ 🌸 Thank you so much for voting! Here's your gift!\n\n"
             f"**{item}** ({tier_labels[tier]})\n\n"
+            f"{kiss_line}\n\n"
+            f"💖 **Affection:** {old_aff} → **{new_aff}** (+{DAILY_AFFECTION_BONUS})\n"
             f"Type `yua gift {item}` to give it to me~ ❤️\n"
             f"*(Come back in 24 hours for your next reward!)*"
         )
