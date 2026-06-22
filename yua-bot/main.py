@@ -42,6 +42,7 @@ async def on_ready():
 async def main():
     async with bot:
         await bot.load_extension("cogs.chat")
+        await bot.load_extension("cogs.daily")
         token = os.environ.get("DISCORD_TOKEN")
         if not token:
             raise ValueError("DISCORD_TOKEN environment variable is not set.")
