@@ -684,7 +684,8 @@ class Chat(commands.Cog):
 
         # ── Top.gg vote gate ──────────────────────────────────────────────────
         voted = await self._check_topgg_vote(user_id)
-        if voted is False:
+        print(f"[Daily] uid={uid} Top.gg vote check result: {voted!r}")
+        if voted is not True:
             await message.reply(
                 f"Ara ara, {user_name}~ 🌸 I'd love to give you your daily reward, "
                 f"but you haven't voted for me on Top.gg yet today! 🥺\n\n"
@@ -1136,7 +1137,11 @@ class Chat(commands.Cog):
                     )
                     return
                 if lp == "daily":
-                    await self._cmd_daily(message)
+                    try:
+                        await self._cmd_daily(message)
+                    except Exception:
+                        print(f"[on_message] _cmd_daily raised an exception for uid={user_id}:")
+                        traceback.print_exc()
                     return
                 if lp.startswith("gift "):
                     await self._cmd_gift(message, user_prompt[5:].strip())
