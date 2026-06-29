@@ -1124,17 +1124,43 @@ class Chat(commands.Cog):
                 # ── Item command dispatch ──────────────────────────────────
                 lp = user_prompt.lower().strip()
                 if lp in ("help", "h", "?"):
-                    await message.reply(
-                        f"Look, {user_name}. Keep it simple. "
-                        f"Don't make me explain this twice:\n\n"
-                        f"• **Talk naturally** — English or Banglish, I'll handle it.\n"
-                        f"• **`yua quest`** — I'll test you. Try not to fail.\n"
-                        f"• **`yua daily`** — Claim your daily item reward.\n"
-                        f"• **`yua gift <item>`** — Gift me something from your stash.\n"
-                        f"• **`yua points`** — See your affection score and tier.\n"
-                        f"• **`yua leaderboard`** — Check where you stand.\n\n"
-                        f"Don't ping me unnecessarily. Clear?"
+                    embed = discord.Embed(
+                        title="Yua — Command List",
+                        description=(
+                            f"Look, {user_name}. Keep it simple. "
+                            f"Don't make me explain this twice."
+                        ),
+                        color=0xFF69B4,
                     )
+                    embed.add_field(
+                        name="💬 Chat",
+                        value=(
+                            "**`yua <anything>`** — Talk to me. English or Banglish.\n"
+                            "**`yua quest`** — I'll test you. Try not to fail.\n"
+                            "**`yua points`** — Your affection score and tier.\n"
+                            "**`yua leaderboard`** — Check where you stand."
+                        ),
+                        inline=False,
+                    )
+                    embed.add_field(
+                        name="🎁 Rewards",
+                        value=(
+                            "**`yua daily`** — Claim your daily item reward.\n"
+                            "**`yua gift <item>`** — Gift me something from your stash."
+                        ),
+                        inline=False,
+                    )
+                    embed.add_field(
+                        name="🗄️ Kura (Item Storage)",
+                        value=(
+                            "**`yua kura`** — View your Kura inventory.\n"
+                            "**`yua kura gift <item>`** — Give me an item for affection points.\n"
+                            "**`yua kura give @user <item>`** — Transfer an item to another user."
+                        ),
+                        inline=False,
+                    )
+                    embed.set_footer(text="Don't ping me unnecessarily. Clear?")
+                    await message.reply(embed=embed)
                     return
                 if lp == "daily":
                     try:
@@ -1164,6 +1190,17 @@ class Chat(commands.Cog):
                     await message.reply(
                         f"**{user_name}** — ❤️ {aff}/100 · {tier_labels[tier]}"
                     )
+                    return
+                if lp == "kura" or lp.startswith("kura "):
+                    kura_cog = self.bot.cogs.get("Kura")
+                    if kura_cog:
+                        sub      = lp[4:].strip()       # lowercased, after "kura"
+                        original = user_prompt[4:].strip()  # original case, after "kura"
+                        await kura_cog.dispatch(message, user_id, user_name, sub, original)
+                    else:
+                        await message.reply(
+                            f"Kura isn't loaded right now, {user_name}~ 😳 Try again later."
+                        )
                     return
 
                 mood_emoji = random.choice(list(MOODS.values()))
